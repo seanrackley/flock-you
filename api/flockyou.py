@@ -942,8 +942,8 @@ def get_gps_ports():
 
 @app.route('/api/flock/ports', methods=['GET'])
 def get_flock_ports():
-    """Get available serial ports for Flock You device"""
-    return jsonify(android_compat.list_serial_ports())
+    """Get available serial ports, plus any running USB bridge"""
+    return jsonify(android_compat.usb_bridge_ports() + android_compat.list_serial_ports())
 
 @app.route('/api/platform', methods=['GET'])
 def get_platform():

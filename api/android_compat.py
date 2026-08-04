@@ -166,6 +166,58 @@ def list_serial_ports():
     return ports
 
 
+def bridge_state_file():
+    return os.environ.get(
+        'FLOCKYOU_BRIDGE_STATE',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'usb_bridge.json'))
+
+
+def _process_alive(pid):
+    """True if the pid exists. EPERM still means something is running."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def usb_bridge_ports():
+    """Offer a running termux_usb_bridge.py as a ready-made port.
+
+    The bridge writes a small state file when it starts listening, so the URL
+    can be presented in the dropdown instead of typed by hand. A stale file left
+    by a crashed bridge is filtered out by checking the pid.
+    """
+    path = bridge_state_file()
+    try:
+        with open(path) as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        return []
+
+    host = state.get('host') or '127.0.0.1'
+    port = state.get('port')
+    if not port or not _process_alive(state.get('pid')):
+        return []
+
+    url = 'socket://{}:{}'.format(host, port)
+    device = state.get('device') or 'USB CDC-ACM device'
+    return [{
+        'device': url,
+        'description': 'USB bridge - {}'.format(device),
+        'manufacturer': 'termux-usb',
+        'product': device,
+        'vid': None,
+        'pid': None,
+        'accessible': True,
+        'note': 'Served by termux_usb_bridge.py, which must stay running.',
+    }]
+
+
 def gps_pseudo_ports():
     """GPS sources that are not serial devices.
 

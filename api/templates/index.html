@@ -1311,7 +1311,6 @@
                         </div>
                         <button id="connectGpsBtn">Connect</button>
                         <button id="disconnectGpsBtn" class="danger" style="display: none;">Disconnect</button>
-                        <span id="gpsCoords" style="display: none; margin-left: 6px; font-family: monospace; font-size: 0.85em; opacity: 0.85;"></span>
                     </div>
                     
                     <div class="control-group">
@@ -1932,7 +1931,6 @@
                 if (data.status === 'success') {
                     gpsConnected = false;
                     updateGpsStatus(false);
-                    clearGpsFix();
                     document.getElementById('connectGpsBtn').style.display = 'inline-block';
                     document.getElementById('disconnectGpsBtn').style.display = 'none';
                 }
@@ -1959,29 +1957,6 @@
                 indicator.classList.add('active');
             } else {
                 indicator.classList.remove('active');
-            }
-        }
-
-        // Show the latest fix next to the GPS controls. Without this there is no
-        // way to tell a working GPS source from a silent one until a detection
-        // arrives, which is useless when the sniffer is not connected yet.
-        function showGpsFix(fix) {
-            const el = document.getElementById('gpsCoords');
-            if (!el || !fix || fix.latitude === null || fix.latitude === undefined) return;
-
-            const accuracy = (fix.accuracy !== null && fix.accuracy !== undefined)
-                ? ` ±${Math.round(fix.accuracy)}m` : '';
-            const satellites = fix.satellites ? ` · ${fix.satellites} sats` : '';
-            el.textContent = `${fix.latitude.toFixed(5)}, ${fix.longitude.toFixed(5)}${accuracy}${satellites}`;
-            el.title = 'Last fix received ' + new Date().toLocaleTimeString();
-            el.style.display = 'inline';
-        }
-
-        function clearGpsFix() {
-            const el = document.getElementById('gpsCoords');
-            if (el) {
-                el.textContent = '';
-                el.style.display = 'none';
             }
         }
 
@@ -2333,13 +2308,11 @@
 
         socket.on('gps_update', function(gpsData) {
             console.log('GPS Update:', gpsData);
-            showGpsFix(gpsData);
         });
 
         socket.on('gps_disconnected', function() {
             console.log('GPS disconnected');
             updateGpsStatus(false);
-            clearGpsFix();
             const connectBtn = document.getElementById('connectGpsBtn');
             const disconnectBtn = document.getElementById('disconnectGpsBtn');
             if (connectBtn) connectBtn.style.display = 'inline-block';

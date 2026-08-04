@@ -27,12 +27,19 @@ Requires: pkg install libusb
 import argparse
 import ctypes
 import ctypes.util
+import json
 import os
+import signal
 import socket
 import struct
 import sys
 import threading
 import time
+
+# Where the running bridge announces itself so the dashboard can offer it in the
+# port dropdown instead of making the user type a socket:// URL by hand.
+DEFAULT_STATE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'data', 'usb_bridge.json')
 
 # - - - - - - - - - - - - - - libusb constants - - - - - - - - - - - - - - - -
 
@@ -136,6 +143,40 @@ class ConfigDescriptor(ctypes.Structure):
 
 class BridgeError(Exception):
     """Raised with a message that explains what to do about it."""
+
+
+def write_state(path, host, port, description):
+    """Announce this bridge so the dashboard can list it as a selectable port."""
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {
+            'host': host,
+            'port': port,
+            'pid': os.getpid(),
+            'device': description,
+            'started': time.time(),
+        }
+        temporary = path + '.tmp'
+        with open(temporary, 'w') as handle:
+            json.dump(payload, handle)
+        os.replace(temporary, path)   # atomic, so a reader never sees half a file
+    except OSError as exc:
+        print('note: could not write {} ({})'.format(path, exc), file=sys.stderr)
+
+
+def clear_state(path):
+    """Remove our announcement, leaving another bridge's entry alone."""
+    if not path:
+        return
+    try:
+        with open(path) as handle:
+            if json.load(handle).get('pid') != os.getpid():
+                return
+        os.remove(path)
+    except (OSError, ValueError):
+        pass
 
 
 def load_libusb():
@@ -354,6 +395,12 @@ class UsbCdcDevice(object):
                     self.interfaces.data_interface = alt.bInterfaceNumber
                     self.interfaces.endpoint_in = bulk_in
                     self.interfaces.endpoint_out = bulk_out
+
+    def summary(self):
+        """One-line device identity for the dashboard's port list."""
+        if not self.descriptor:
+            return 'USB CDC-ACM device'
+        return 'USB {:04x}:{:04x}'.format(self.descriptor.idVendor, self.descriptor.idProduct)
 
     def describe(self):
         lines = []
@@ -599,11 +646,35 @@ def parse_args(argv):
     parser.add_argument('--probe', action='store_true',
                         help='print the device descriptors and exit')
     parser.add_argument('--verbose', action='store_true', help='report non-fatal problems')
+    parser.add_argument('--state-file', default=DEFAULT_STATE_FILE,
+                        help='file announcing this bridge to the dashboard')
+    parser.add_argument('--no-state', action='store_true',
+                        help='do not announce the bridge to the dashboard')
     return parser.parse_args(argv)
+
+
+def install_signal_handlers():
+    """Turn termination signals into SystemExit so cleanup still runs.
+
+    Without this, closing the Termux session or killing the process leaves the
+    state file behind. Readers tolerate that by checking the pid, but tidying up
+    properly is better than relying on the safety net.
+    """
+    def terminate(signum, frame):
+        raise SystemExit(0)
+
+    for name in ('SIGTERM', 'SIGHUP'):
+        number = getattr(signal, name, None)
+        if number is not None:
+            try:
+                signal.signal(number, terminate)
+            except (ValueError, OSError):
+                pass
 
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    install_signal_handlers()
 
     if args.fd is None:
         print(__doc__.strip(), file=sys.stderr)
@@ -632,8 +703,11 @@ def main(argv=None):
 
         server = BridgeServer(device, host=args.host, port=args.port)
         port = server.start()
+        state_file = None if args.no_state else args.state_file
+        write_state(state_file, args.host, port, device.summary())
+
         print('bridging USB device to socket://{}:{}'.format(args.host, port), file=sys.stderr)
-        print('connect the dashboard to that URL with "Enter manually…"', file=sys.stderr)
+        print('it will appear in the dashboard\'s Sniffer dropdown', file=sys.stderr)
         server.pump()
 
     except BridgeError as exc:
@@ -642,6 +716,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         print('\nstopping', file=sys.stderr)
     finally:
+        clear_state(None if args.no_state else args.state_file)
         if server:
             server.stop()
         device.close()

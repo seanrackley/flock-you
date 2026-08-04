@@ -72,8 +72,9 @@ sniffer usually cannot be opened directly. In order of preference:
 
 | Setup | How to connect |
 |---|---|
+| Un-rooted phone, USB OTG | Run the [termux-usb bridge](#usb-sniffer-without-root-the-termux-usb-bridge) and pick it from the dropdown |
 | Rooted phone, USB OTG | Select `/dev/ttyUSB0` or `/dev/ttyACM0` as usual |
-| Un-rooted phone | Bridge the sniffer from another machine with `ser2net`, then enter `socket://<host>:<port>` as the port |
+| Sniffer on another machine | Share it with `ser2net`, then enter `socket://<host>:<port>` as the port |
 | Offline analysis | Use the JSON/CSV/KML import buttons with files exported from the ESP32 dashboard |
 
 Any pySerial URL works where a device path is expected, including
@@ -126,8 +127,10 @@ pkg install libusb termux-api
 ./start-usb-bridge.sh
 ```
 
-Leave that running, then connect the dashboard to `socket://127.0.0.1:4000`
-using **"Enter manually…"** in the Sniffer dropdown.
+Leave that running. The bridge announces itself while it is up, so it appears in
+the Sniffer dropdown as **"USB bridge - USB 303a:1001"** — just select it and
+connect, no URL to type. The entry disappears when the bridge stops, and a stale
+announcement left by a crashed bridge is ignored.
 
 Inspect the device before streaming — this prints its interfaces and endpoints
 and exits, which is the quickest way to see whether it looks like CDC-ACM:
