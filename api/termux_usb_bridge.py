@@ -14,9 +14,9 @@ then connects to it as a normal pySerial URL:
 
     socket://127.0.0.1:4000
 
-Run it via termux-usb, which supplies the descriptor as the first argument:
-
-    termux-usb -r -e ./termux_usb_bridge.py /dev/bus/usb/001/002
+Launch it with ./start-usb-bridge.sh, which handles the termux-usb invocation.
+termux-usb execs a single program and passes the descriptor as its only
+argument, so the wrapper generates a small launcher to carry any extra flags.
 
 Use --probe first: it prints the device's descriptors and exits, which is the
 fastest way to see whether the interfaces look like CDC-ACM.

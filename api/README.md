@@ -124,10 +124,18 @@ as an ordinary pySerial URL.
 
 ```bash
 pkg install libusb termux-api
-./start-usb-bridge.sh
+./start-all.sh
 ```
 
-Leave that running. The bridge announces itself while it is up, so it appears in
+`start-all.sh` runs the dashboard and the bridge together, so there is one
+Termux session to watch and one Ctrl+C to stop both. The bridge cannot simply be
+folded into the dashboard process: `termux-usb` only hands the USB descriptor to
+a program it launches itself, so it has to be a separate child. Pass
+`--no-bridge` for the dashboard alone; anything else (`--port`, `--verbose`, a
+`/dev/bus/usb/...` path) is forwarded to the bridge. If the bridge cannot start,
+the dashboard keeps running — imports, exports and browser GPS do not need it.
+
+To run just the bridge in its own session, `./start-usb-bridge.sh` still works. The bridge announces itself while it is up, so it appears in
 the Sniffer dropdown as **"USB bridge - USB 303a:1001"** — just select it and
 connect, no URL to type. The entry disappears when the bridge stops, and a stale
 announcement left by a crashed bridge is ignored.

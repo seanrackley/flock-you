@@ -39,10 +39,14 @@ fi
 
 # termux-usb runs the given program with the descriptor as its first argument.
 # Any extra flags are passed along through a generated launcher.
-LAUNCHER="$SCRIPT_DIR/.usb-bridge-launcher.sh"
+mkdir -p "$SCRIPT_DIR/data"
+LAUNCHER="$SCRIPT_DIR/data/usb-bridge-launcher.sh"
+# Resolve the shell rather than hardcoding Termux's prefix, which differs
+# between installs and does not exist off-device.
+SHELL_PATH=$(command -v sh)
 cat > "$LAUNCHER" <<LAUNCH
-#!/data/data/com.termux/files/usr/bin/sh
-exec python "$BRIDGE" "\$1"$EXTRA
+#!$SHELL_PATH
+exec ${PYTHON:-python} "$BRIDGE" "\$1"$EXTRA
 LAUNCH
 chmod +x "$LAUNCHER"
 
