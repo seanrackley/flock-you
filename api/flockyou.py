@@ -776,6 +776,14 @@ def connect_gps():
             serial_connection.close()
             serial_connection = None
 
+        if port == android_compat.BROWSER_GPS_PORT:
+            # Nothing to open: the browser pushes fixes to /api/gps/position.
+            gps_source = 'browser'
+            gps_port = port
+            with connection_lock:
+                gps_enabled = True
+            return jsonify({'status': 'success', 'message': 'Using browser location'})
+
         if port == android_compat.TERMUX_LOCATION_PORT:
             if not android_compat.termux_location_available():
                 return jsonify({
@@ -804,6 +812,63 @@ def connect_gps():
         return jsonify({'status': 'success', 'message': f'Connected to {port}'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': android_compat.describe_serial_error(port or '', e)}), 400
+
+@app.route('/api/gps/position', methods=['POST'])
+def receive_browser_position():
+    """Accept a position from the browser's Geolocation API.
+
+    This is the only location source available on the Google Play build of
+    Termux, where Termux:API (and therefore termux-location) does not exist.
+    Fixes are stored in the same shape as parse_nmea_sentence() output so
+    matching, validation and export are unchanged.
+    """
+    global gps_data
+
+    if not gps_enabled or gps_source != 'browser':
+        return jsonify({'status': 'error', 'message': 'Browser GPS is not the active source'}), 409
+
+    data = request.json or {}
+    try:
+        latitude = float(data['latitude'])
+        longitude = float(data['longitude'])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'latitude and longitude are required'}), 400
+
+    if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+        return jsonify({'status': 'error', 'message': 'Coordinates out of range'}), 400
+
+    fix = {
+        'latitude': round(latitude, 8),
+        'longitude': round(longitude, 8),
+        'altitude': round(float(data.get('altitude') or 0.0), 3),
+        'fix_quality': 1,
+        'satellites': 0,
+        'timestamp': datetime.now().isoformat(),
+        'provider': 'browser',
+    }
+    accuracy = data.get('accuracy')
+    if accuracy is not None:
+        try:
+            fix['accuracy'] = round(float(accuracy), 2)
+            fix['hdop'] = fix['accuracy']
+        except (TypeError, ValueError):
+            pass
+
+    gps_data = fix
+
+    gps_entry = fix.copy()
+    gps_entry['system_timestamp'] = time.time()
+    gps_history.append(gps_entry)
+    if len(gps_history) > MAX_GPS_HISTORY:
+        gps_history.pop(0)
+
+    safe_socket_emit('gps_update', fix)
+    accuracy_text = f" (±{fix['accuracy']}m)" if 'accuracy' in fix else ""
+    safe_socket_emit('serial_data',
+                     f"Browser GPS: {fix['latitude']}, {fix['longitude']}{accuracy_text}",
+                     room='serial_terminal')
+
+    return jsonify({'status': 'success'})
 
 @app.route('/api/gps/disconnect', methods=['POST'])
 def disconnect_gps():

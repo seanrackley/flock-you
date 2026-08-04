@@ -32,8 +32,9 @@ import subprocess
 import sys
 import types
 
-# Pseudo-port that maps to the phone's built-in GPS instead of a serial device.
+# Pseudo-ports that map to a location source instead of a serial device.
 TERMUX_LOCATION_PORT = 'termux-location'
+BROWSER_GPS_PORT = 'browser-gps'
 
 # Android reports "android" on Python 3.13+, but older builds (and some
 # distributions) still say "linux" while clearly running under Android.
@@ -166,19 +167,38 @@ def list_serial_ports():
 
 
 def gps_pseudo_ports():
-    """GPS sources that are not serial devices (currently the phone's own GPS)."""
-    if not termux_location_available():
-        return []
-    return [{
-        'device': TERMUX_LOCATION_PORT,
-        'description': "Phone's built-in GPS (Termux:API)",
-        'manufacturer': 'Android',
-        'product': 'Location services',
+    """GPS sources that are not serial devices.
+
+    The browser source is always offered: it needs nothing installed, and it is
+    the only option on the Google Play build of Termux, where Termux:API is not
+    available. termux-location is listed only when its helper is present.
+    """
+    sources = [{
+        'device': BROWSER_GPS_PORT,
+        'description': "Phone's built-in GPS (browser)",
+        'manufacturer': 'Browser',
+        'product': 'Geolocation API',
         'vid': None,
         'pid': None,
         'accessible': True,
-        'note': 'Uses the phone GPS. Grant Termux:API location permission first.',
+        'note': ('The browser showing this page supplies the position. Requires '
+                 'a secure context: works over localhost, but needs HTTPS if you '
+                 'load the dashboard from another device.'),
     }]
+
+    if termux_location_available():
+        sources.append({
+            'device': TERMUX_LOCATION_PORT,
+            'description': "Phone's built-in GPS (Termux:API)",
+            'manufacturer': 'Android',
+            'product': 'Location services',
+            'vid': None,
+            'pid': None,
+            'accessible': True,
+            'note': 'Uses the phone GPS. Grant Termux:API location permission first.',
+        })
+
+    return sources
 
 
 # - - - - - - - - - - - - - - opening a port - - - - - - - - - - - - - - - - -

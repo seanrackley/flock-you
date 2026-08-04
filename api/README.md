@@ -81,6 +81,12 @@ Any pySerial URL works where a device path is expected, including
 that exist but cannot be opened, with a note explaining why, and failed
 connections return a message suggesting the workaround that applies.
 
+**An empty dropdown is the normal result on an un-rooted phone.** It means the
+kernel never created a `/dev/tty*` node for the adapter, so there is nothing to
+list and no permission to grant — the device is simply not reachable from
+userspace. Confirm with `ls -l /dev/tty*`: if there is no `ttyUSB*` or `ttyACM*`
+entry, use the `socket://` bridge or import exported files instead.
+
 `GET /api/platform` reports what the server detected: platform, whether the shim
 is active, root status, available Termux:API helpers, and USB devices Android
 can see. Start there when something will not connect.
@@ -88,11 +94,27 @@ can see. Start there when something will not connect.
 ### GPS from the phone
 
 Android will not open a USB GPS dongle either, but the phone has its own
-receiver. With the **Termux:API app** installed (the app from F-Droid, not just
-the `termux-api` package) and location permission granted, the GPS dropdown
-lists **`termux-location`**. Selecting it feeds the phone's fixes into the same
-matching, validation and export paths a serial NMEA dongle would use, including
-an `accuracy` value in metres.
+receiver. There are two ways to reach it, and both feed the same matching,
+validation and export paths a serial NMEA dongle would use, including an
+`accuracy` value in metres.
+
+**`browser-gps` — works everywhere, nothing to install.** The browser showing
+the dashboard supplies the position via the Geolocation API. Select it in the
+GPS dropdown and allow location access when prompted. This is the only option on
+the **Google Play build of Termux**, where Termux:API does not exist yet: the
+`termux-api` package installs the command-line shims, but they fail with
+*"Termux:API is not yet available on Google Play"* because the companion app
+cannot be installed.
+
+Browsers only expose geolocation in a secure context. Loading the dashboard on
+the phone itself at `http://localhost:5000` qualifies. Loading it from another
+device over the LAN does not, and the browser will refuse without HTTPS.
+
+**`termux-location` — needs Termux:API.** Listed only when the helper is
+present. Requires the **Termux:API app** (from F-Droid, not merely the
+`termux-api` package) plus location permission. Termux and Termux:API must come
+from the same source, since Android blocks them from communicating when their
+signing keys differ.
 
 ### Environment variables
 

@@ -1783,6 +1783,51 @@
             });
         }
 
+        // Browser geolocation source. Used when Termux:API is unavailable (the
+        // Google Play build of Termux has no Termux:API app), and on any phone
+        // where Android blocks access to a USB GPS receiver.
+        const BROWSER_GPS_PORT = 'browser-gps';
+        let browserGpsWatchId = null;
+
+        function startBrowserGps() {
+            if (!navigator.geolocation) {
+                alert('This browser does not support geolocation.');
+                return false;
+            }
+
+            browserGpsWatchId = navigator.geolocation.watchPosition(
+                position => {
+                    fetch('/api/gps/position', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            latitude: position.coords.latitude,
+                            longitude: position.coords.longitude,
+                            altitude: position.coords.altitude,
+                            accuracy: position.coords.accuracy
+                        })
+                    }).catch(error => console.error('Failed to send position:', error));
+                },
+                error => {
+                    console.error('Browser GPS error:', error);
+                    if (error.code === error.PERMISSION_DENIED) {
+                        alert('Location permission denied. Allow location access for this site, then reconnect.');
+                    } else if (error.code === error.POSITION_UNAVAILABLE) {
+                        alert('No position available. A GPS fix can take a minute outdoors.');
+                    }
+                },
+                { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 }
+            );
+            return true;
+        }
+
+        function stopBrowserGps() {
+            if (browserGpsWatchId !== null) {
+                navigator.geolocation.clearWatch(browserGpsWatchId);
+                browserGpsWatchId = null;
+            }
+        }
+
         function connectGps() {
             const port = document.getElementById('gpsPortSelect').value;
             if (!port) {
@@ -1803,6 +1848,9 @@
             .then(data => {
                 console.log('GPS connection response:', data);
                 if (data.status === 'success') {
+                    if (port === BROWSER_GPS_PORT) {
+                        startBrowserGps();
+                    }
                     gpsConnected = true;
                     updateGpsStatus(true);
                     document.getElementById('connectGpsBtn').style.display = 'none';
@@ -1819,7 +1867,9 @@
 
         function disconnectGps() {
             console.log('Disconnecting GPS device');
-            
+
+            stopBrowserGps();
+
             fetch('/api/gps/disconnect', {
                 method: 'POST'
             })
