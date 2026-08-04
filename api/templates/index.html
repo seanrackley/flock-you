@@ -1311,6 +1311,7 @@
                         </div>
                         <button id="connectGpsBtn">Connect</button>
                         <button id="disconnectGpsBtn" class="danger" style="display: none;">Disconnect</button>
+                        <span id="gpsCoords" style="display: none; margin-left: 6px; font-family: monospace; font-size: 0.85em; opacity: 0.85;"></span>
                     </div>
                     
                     <div class="control-group">
@@ -1549,10 +1550,12 @@
             });
 
             document.getElementById('flockDeviceSelect').addEventListener('change', function() {
+                handleManualSelection(this, 'flock');
                 saveSettings();
             });
 
             document.getElementById('gpsPortSelect').addEventListener('change', function() {
+                handleManualSelection(this, 'gps');
                 saveSettings();
             });
 
@@ -1666,7 +1669,9 @@
                     });
                     
                     // Restore selection if it still exists in the new list
-                    if (currentSelection && ports.some(p => p.device === currentSelection)) {
+                    addManualOption(select, 'gps');
+
+                    if (currentSelection && (ports.some(p => p.device === currentSelection) || currentSelection === manualPorts.gps)) {
                         select.value = currentSelection;
                     }
                     
@@ -1712,7 +1717,9 @@
                     });
                     
                     // Restore selection if it still exists in the new list
-                    if (currentSelection && ports.some(p => p.device === currentSelection)) {
+                    addManualOption(select, 'flock');
+
+                    if (currentSelection && (ports.some(p => p.device === currentSelection) || currentSelection === manualPorts.flock)) {
                         select.value = currentSelection;
                     }
                     
@@ -1781,6 +1788,52 @@
             .catch(error => {
                 console.error('Flock disconnect error:', error);
             });
+        }
+
+        // Manual port entry. Android denies unprivileged apps permission to list
+        // /dev, so enumeration can come back empty even when a device is openable
+        // by path. This is also the only way to enter a socket:// URL.
+        const manualPorts = { flock: null, gps: null };
+
+        function addManualOption(select, kind) {
+            const trigger = document.createElement('option');
+            trigger.value = '__manual__';
+            trigger.textContent = 'Enter manually…';
+            select.appendChild(trigger);
+
+            if (manualPorts[kind]) {
+                setManualPort(select, kind, manualPorts[kind]);
+            }
+        }
+
+        function setManualPort(select, kind, value) {
+            select.querySelectorAll('option[data-manual]').forEach(option => option.remove());
+            manualPorts[kind] = value || null;
+            if (!value) return;
+
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = value + ' (manual)';
+            option.dataset.manual = '1';
+            select.insertBefore(option, select.querySelector('option[value="__manual__"]'));
+        }
+
+        function handleManualSelection(select, kind) {
+            if (select.value !== '__manual__') return;
+
+            const entry = (prompt(
+                'Device path or pySerial URL:\n\n' +
+                '  /dev/ttyACM0\n' +
+                '  socket://192.168.1.50:4000'
+            ) || '').trim();
+
+            if (!entry) {
+                select.value = manualPorts[kind] || '';
+                return;
+            }
+
+            setManualPort(select, kind, entry);
+            select.value = entry;
         }
 
         // Browser geolocation source. Used when Termux:API is unavailable (the
@@ -1879,6 +1932,7 @@
                 if (data.status === 'success') {
                     gpsConnected = false;
                     updateGpsStatus(false);
+                    clearGpsFix();
                     document.getElementById('connectGpsBtn').style.display = 'inline-block';
                     document.getElementById('disconnectGpsBtn').style.display = 'none';
                 }
@@ -1900,11 +1954,34 @@
 
         function updateGpsStatus(connected) {
             const indicator = document.getElementById('gpsStatus');
-            
+
             if (connected) {
                 indicator.classList.add('active');
             } else {
                 indicator.classList.remove('active');
+            }
+        }
+
+        // Show the latest fix next to the GPS controls. Without this there is no
+        // way to tell a working GPS source from a silent one until a detection
+        // arrives, which is useless when the sniffer is not connected yet.
+        function showGpsFix(fix) {
+            const el = document.getElementById('gpsCoords');
+            if (!el || !fix || fix.latitude === null || fix.latitude === undefined) return;
+
+            const accuracy = (fix.accuracy !== null && fix.accuracy !== undefined)
+                ? ` ±${Math.round(fix.accuracy)}m` : '';
+            const satellites = fix.satellites ? ` · ${fix.satellites} sats` : '';
+            el.textContent = `${fix.latitude.toFixed(5)}, ${fix.longitude.toFixed(5)}${accuracy}${satellites}`;
+            el.title = 'Last fix received ' + new Date().toLocaleTimeString();
+            el.style.display = 'inline';
+        }
+
+        function clearGpsFix() {
+            const el = document.getElementById('gpsCoords');
+            if (el) {
+                el.textContent = '';
+                el.style.display = 'none';
             }
         }
 
@@ -2256,11 +2333,13 @@
 
         socket.on('gps_update', function(gpsData) {
             console.log('GPS Update:', gpsData);
+            showGpsFix(gpsData);
         });
 
         socket.on('gps_disconnected', function() {
             console.log('GPS disconnected');
             updateGpsStatus(false);
+            clearGpsFix();
             const connectBtn = document.getElementById('connectGpsBtn');
             const disconnectBtn = document.getElementById('disconnectGpsBtn');
             if (connectBtn) connectBtn.style.display = 'inline-block';

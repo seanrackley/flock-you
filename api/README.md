@@ -81,11 +81,29 @@ Any pySerial URL works where a device path is expected, including
 that exist but cannot be opened, with a note explaining why, and failed
 connections return a message suggesting the workaround that applies.
 
-**An empty dropdown is the normal result on an un-rooted phone.** It means the
-kernel never created a `/dev/tty*` node for the adapter, so there is nothing to
-list and no permission to grant — the device is simply not reachable from
-userspace. Confirm with `ls -l /dev/tty*`: if there is no `ttyUSB*` or `ttyACM*`
-entry, use the `socket://` bridge or import exported files instead.
+**An empty dropdown is the normal result on an un-rooted phone**, and it does not
+prove the device is missing. Android denies unprivileged apps permission to list
+`/dev`, so the glob that enumerates ports returns nothing regardless of what is
+attached. A device may still be openable by path.
+
+Pick **"Enter manually…"** in either dropdown to type a device path or a pySerial
+URL directly, bypassing enumeration entirely:
+
+```
+/dev/ttyACM0
+socket://192.168.1.50:4000
+```
+
+The entry is remembered and survives the dropdown's periodic refresh. To find out
+whether a node exists at all, stat it directly rather than listing the directory:
+
+```bash
+ls -l /dev/ttyACM0 /dev/ttyUSB0
+```
+
+"No such file" means the kernel never bound a serial driver, which needs root —
+use the `socket://` bridge or the file import buttons instead. "Permission
+denied" means the node exists but is not accessible to you.
 
 `GET /api/platform` reports what the server detected: platform, whether the shim
 is active, root status, available Termux:API helpers, and USB devices Android
