@@ -109,6 +109,38 @@ denied" means the node exists but is not accessible to you.
 is active, root status, available Termux:API helpers, and USB devices Android
 can see. Start there when something will not connect.
 
+### USB sniffer without root: the termux-usb bridge
+
+Android binds its own kernel driver to a USB serial adapter — that is what
+creates `/dev/ttyACM0` — but leaves the node `root:root` mode `0600`, so an
+unprivileged app can never open it. `termux-usb` sidesteps the kernel: it asks
+Android's UsbManager for permission and hands back a file descriptor for the raw
+USB device.
+
+pySerial cannot use such a descriptor, so `termux_usb_bridge.py` speaks CDC-ACM
+over libusb itself and re-exposes the stream on TCP, which the dashboard reads
+as an ordinary pySerial URL.
+
+```bash
+pkg install libusb termux-api
+./start-usb-bridge.sh
+```
+
+Leave that running, then connect the dashboard to `socket://127.0.0.1:4000`
+using **"Enter manually…"** in the Sniffer dropdown.
+
+Inspect the device before streaming — this prints its interfaces and endpoints
+and exits, which is the quickest way to see whether it looks like CDC-ACM:
+
+```bash
+./start-usb-bridge.sh --probe
+```
+
+Only standard CDC-ACM devices work. A board using a CP210x, CH340 or FTDI chip
+speaks a vendor-specific protocol this bridge does not implement; `--probe` will
+report no CDC data interface in that case. Requires libusb 1.0.23 or newer for
+`libusb_wrap_sys_device`.
+
 ### GPS from the phone
 
 Android will not open a USB GPS dongle either, but the phone has its own
