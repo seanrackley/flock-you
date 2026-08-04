@@ -36,11 +36,75 @@ A Flask-based web dashboard for real-time monitoring and analysis of Flock Safet
 
 2. **Run the application**:
    ```bash
-   python app.py
+   python flockyou.py
    ```
 
 3. **Access the dashboard**:
    Open your browser and navigate to `http://localhost:5000`
+
+## Running on Android (Termux)
+
+The dashboard runs on Android under Termux. Two things differ from a desktop:
+port enumeration needed a compatibility shim, and Android restricts serial
+access.
+
+### Setup
+
+```bash
+pkg install python termux-api
+pip install -r requirements.txt
+python flockyou.py
+```
+
+Then open `http://localhost:5000` in the phone's browser.
+
+`android_compat.py` handles the platform differences. Python 3.13 changed
+`sys.platform` from `"linux"` to `"android"`, and pySerial 3.5 predates that, so
+`import serial.tools.list_ports` aborts at import time with *"no implementation
+for your platform"*. The shim routes enumeration through pySerial's Linux
+backend, which works unmodified on Android. It installs itself only when the
+stock backend is broken, so desktop behaviour is unchanged.
+
+### Getting sniffer data onto the phone
+
+Android does not give unprivileged apps raw access to `/dev/tty*`, so a USB-OTG
+sniffer usually cannot be opened directly. In order of preference:
+
+| Setup | How to connect |
+|---|---|
+| Rooted phone, USB OTG | Select `/dev/ttyUSB0` or `/dev/ttyACM0` as usual |
+| Un-rooted phone | Bridge the sniffer from another machine with `ser2net`, then enter `socket://<host>:<port>` as the port |
+| Offline analysis | Use the JSON/CSV/KML import buttons with files exported from the ESP32 dashboard |
+
+Any pySerial URL works where a device path is expected, including
+`socket://host:port` and `rfc2217://host:port`. The port dropdown lists devices
+that exist but cannot be opened, with a note explaining why, and failed
+connections return a message suggesting the workaround that applies.
+
+`GET /api/platform` reports what the server detected: platform, whether the shim
+is active, root status, available Termux:API helpers, and USB devices Android
+can see. Start there when something will not connect.
+
+### GPS from the phone
+
+Android will not open a USB GPS dongle either, but the phone has its own
+receiver. With the **Termux:API app** installed (the app from F-Droid, not just
+the `termux-api` package) and location permission granted, the GPS dropdown
+lists **`termux-location`**. Selecting it feeds the phone's fixes into the same
+matching, validation and export paths a serial NMEA dongle would use, including
+an `accuracy` value in metres.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FLOCKYOU_HOST` | `0.0.0.0` | Bind address. Set to `127.0.0.1` to keep the dashboard off the local network |
+| `FLOCKYOU_PORT` | `5000` | Listen port |
+| `FLOCKYOU_VERBOSE` | off | Socket.IO packet logging, off by default because it is costly on a phone |
+| `SECRET_KEY` | dev key | Flask secret key |
+
+Data and export paths are resolved relative to `flockyou.py`, so the server can
+be started from any directory — useful in Termux, which starts you in `$HOME`.
 
 ## Usage
 

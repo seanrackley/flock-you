@@ -6,6 +6,12 @@ from datetime import datetime
 import time
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import threading
+
+# Must run before serial.tools.list_ports is imported: pySerial 3.5 aborts at
+# import time on Android, where sys.platform reads "android" rather than "linux".
+import android_compat
+android_compat.install_pyserial_shim()
+
 import serial
 import serial.tools.list_ports
 import queue
@@ -15,7 +21,12 @@ from pathlib import Path
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'flockyou_dev_key_2024')
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', logger=True, engineio_logger=True)
+
+# Socket.IO's per-packet logging costs real battery and CPU on a phone, so it is
+# opt-in via FLOCKYOU_VERBOSE=1 rather than always on.
+VERBOSE_LOGGING = os.environ.get('FLOCKYOU_VERBOSE', '').lower() in ('1', 'true', 'yes')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading',
+                    logger=VERBOSE_LOGGING, engineio_logger=VERBOSE_LOGGING)
 
 # Global variables
 detections = []
@@ -27,6 +38,8 @@ MAX_GPS_HISTORY = 100  # Keep last 100 GPS readings
 GPS_MATCH_THRESHOLD = 30  # Max seconds between detection and GPS reading
 serial_connection = None
 gps_enabled = False
+gps_port = None  # Tracked separately so reconnects work after the port object is gone
+gps_source = 'serial'  # 'serial' (NMEA dongle) or 'termux' (phone GPS)
 flock_device_connected = False
 flock_device_port = None
 flock_serial_connection = None
@@ -40,8 +53,12 @@ serial_queue = queue.Queue()
 next_detection_id = 1  # Unique ID counter
 settings = {'gps_port': '', 'flock_port': '', 'filter': 'all'}
 
-# Data storage paths
-DATA_DIR = Path('data')
+# Data storage paths, anchored to this file rather than the working directory:
+# Termux drops you in $HOME, not the project directory.
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / 'data'
+EXPORT_DIR = BASE_DIR / 'exports'
+OUI_FILE = BASE_DIR / 'oui.txt'
 CUMULATIVE_DATA_FILE = DATA_DIR / 'cumulative_detections.pkl'
 SETTINGS_FILE = DATA_DIR / 'settings.json'
 
@@ -97,7 +114,7 @@ def load_oui_database():
     """Load the IEEE OUI database for manufacturer lookups"""
     global oui_database
     try:
-        with open('oui.txt', 'r', encoding='utf-8', errors='ignore') as f:
+        with open(OUI_FILE, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith('#') and '(hex)' in line:
@@ -244,6 +261,50 @@ def gps_reader():
                 safe_socket_emit('gps_disconnected', {})
                 break
         time.sleep(0.1)
+
+def termux_location_reader():
+    """Background thread that feeds the phone's own GPS in place of a dongle.
+
+    Android will not let an unprivileged app open a USB GPS receiver, so on a
+    phone the built-in receiver is the only practical location source. Fixes are
+    published in the same shape as parse_nmea_sentence() so everything
+    downstream (matching, validation, export) is unchanged.
+    """
+    global gps_data, gps_enabled
+
+    while gps_enabled:
+        try:
+            fix = android_compat.read_termux_location()
+        except Exception as e:
+            print(f"Phone GPS read error: {e}")
+            fix = None
+
+        if fix:
+            fix['timestamp'] = datetime.now().isoformat()
+            gps_data = fix
+
+            gps_entry = fix.copy()
+            gps_entry['system_timestamp'] = time.time()
+            gps_history.append(gps_entry)
+            if len(gps_history) > MAX_GPS_HISTORY:
+                gps_history.pop(0)
+
+            safe_socket_emit('gps_update', fix)
+            accuracy = fix.get('accuracy')
+            accuracy_text = f" (±{accuracy}m)" if accuracy is not None else ""
+            safe_socket_emit(
+                'serial_data',
+                f"Phone GPS: {fix['latitude']}, {fix['longitude']}{accuracy_text}",
+                room='serial_terminal')
+        else:
+            print("Phone GPS: no fix available (check Termux:API location permission)")
+
+        # termux-location blocks until the provider answers, so this interval is
+        # a floor on the poll rate, not the rate itself.
+        for _ in range(50):
+            if not gps_enabled:
+                break
+            time.sleep(0.1)
 
 def flock_reader():
     """Background thread for reading Flock device data"""
@@ -502,8 +563,8 @@ def connection_monitor():
     
     with app.app_context():
         while True:
-            # Check GPS connection
-            if gps_enabled:
+            # Check GPS connection (the phone GPS has no serial handle to test)
+            if gps_enabled and gps_source == 'serial':
                 try:
                     if not serial_connection or not serial_connection.is_open:
                         with connection_lock:
@@ -568,7 +629,7 @@ def attempt_reconnect_flock():
                     # Wait a moment for the device to be ready
                     time.sleep(1)
                     
-                    flock_serial_connection = serial.Serial(flock_device_port, 115200, timeout=1)
+                    flock_serial_connection = android_compat.open_serial(flock_device_port, 115200, timeout=1)
                     
                     # Test the connection
                     test_data = flock_serial_connection.readline()
@@ -600,27 +661,36 @@ def attempt_reconnect_flock():
 
 def attempt_reconnect_gps():
     """Attempt to reconnect to GPS device"""
-    global gps_enabled, reconnect_attempts
-    
+    global gps_enabled, reconnect_attempts, serial_connection
+
     def reconnect_thread():
-        global gps_enabled, reconnect_attempts
+        global gps_enabled, reconnect_attempts, serial_connection
 
         with app.app_context():
             while not gps_enabled and reconnect_attempts['gps'] < max_reconnect_attempts:
                 try:
                     print(f"Attempting to reconnect to GPS device (attempt {reconnect_attempts['gps'] + 1}/{max_reconnect_attempts})")
-                    
-                    # Try to reconnect
-                    test_ser = serial.Serial(serial_connection.port, GPS_BAUDRATE, timeout=1)
-                    test_ser.close()
-                    
+
+                    if not gps_port:
+                        print("No GPS port recorded, cannot reconnect")
+                        return
+
+                    # Reopen and keep the connection: the old handle is dead, and
+                    # gps_reader() needs a live one to read from.
+                    if serial_connection:
+                        try:
+                            serial_connection.close()
+                        except Exception:
+                            pass
+                    serial_connection = android_compat.open_serial(gps_port, GPS_BAUDRATE, timeout=GPS_TIMEOUT)
+
                     # If successful, update status
                     with connection_lock:
                         gps_enabled = True
                     reconnect_attempts['gps'] = 0
-                    print(f"Successfully reconnected to GPS device on {serial_connection.port}")
-                    safe_socket_emit('gps_reconnected', {'port': serial_connection.port})
-                    
+                    print(f"Successfully reconnected to GPS device on {gps_port}")
+                    safe_socket_emit('gps_reconnected', {'port': gps_port})
+
                     # Restart the reading thread
                     gps_thread = threading.Thread(target=gps_reader, daemon=True)
                     gps_thread.start()
@@ -695,39 +765,59 @@ def add_detection():
 
 @app.route('/api/gps/connect', methods=['POST'])
 def connect_gps():
-    """Connect to GPS dongle"""
-    global serial_connection, gps_enabled
-    
+    """Connect to a GPS source: a serial NMEA dongle or the phone's own GPS"""
+    global serial_connection, gps_enabled, gps_port, gps_source
+
     data = request.json
     port = data.get('port')
-    
+
     try:
         if serial_connection:
             serial_connection.close()
-        
-        serial_connection = serial.Serial(port, GPS_BAUDRATE, timeout=GPS_TIMEOUT)
+            serial_connection = None
+
+        if port == android_compat.TERMUX_LOCATION_PORT:
+            if not android_compat.termux_location_available():
+                return jsonify({
+                    'status': 'error',
+                    'message': ('termux-location not found. Install the Termux:API app '
+                                'and run "pkg install termux-api".')
+                }), 400
+
+            gps_source = 'termux'
+            gps_port = port
+            with connection_lock:
+                gps_enabled = True
+            threading.Thread(target=termux_location_reader, daemon=True).start()
+            return jsonify({'status': 'success', 'message': 'Connected to phone GPS'})
+
+        serial_connection = android_compat.open_serial(port, GPS_BAUDRATE, timeout=GPS_TIMEOUT)
+        gps_source = 'serial'
+        gps_port = port
         with connection_lock:
             gps_enabled = True
-        
+
         # Start GPS reading thread
         gps_thread = threading.Thread(target=gps_reader, daemon=True)
         gps_thread.start()
-        
+
         return jsonify({'status': 'success', 'message': f'Connected to {port}'})
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 400
+        return jsonify({'status': 'error', 'message': android_compat.describe_serial_error(port or '', e)}), 400
 
 @app.route('/api/gps/disconnect', methods=['POST'])
 def disconnect_gps():
-    """Disconnect GPS dongle"""
-    global serial_connection, gps_enabled
-    
+    """Disconnect GPS source"""
+    global serial_connection, gps_enabled, gps_port, gps_source
+
     with connection_lock:
         gps_enabled = False
     if serial_connection:
         serial_connection.close()
         serial_connection = None
-    
+    gps_port = None
+    gps_source = 'serial'
+
     return jsonify({'status': 'success', 'message': 'GPS disconnected'})
 
 @app.route('/api/flock/connect', methods=['POST'])
@@ -739,19 +829,20 @@ def connect_flock():
     port = data.get('port')
     
     try:
-        # Create persistent connection to the port
-        flock_serial_connection = serial.Serial(port, 115200, timeout=1)
+        # Create persistent connection to the port (accepts a device path or a
+        # pySerial URL such as socket://192.168.1.50:4000)
+        flock_serial_connection = android_compat.open_serial(port, 115200, timeout=1)
         with connection_lock:
             flock_device_connected = True
         flock_device_port = port
-        
+
         # Start reading thread
         flock_thread = threading.Thread(target=flock_reader, daemon=True)
         flock_thread.start()
-        
+
         return jsonify({'status': 'success', 'message': f'Connected to Flock You device on {port}'})
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 400
+        return jsonify({'status': 'error', 'message': android_compat.describe_serial_error(port or '', e)}), 400
 
 @app.route('/api/flock/disconnect', methods=['POST'])
 def disconnect_flock():
@@ -773,42 +864,26 @@ def get_status():
     """Get connection status of both devices"""
     return jsonify({
         'gps_connected': gps_enabled,
-        'gps_port': serial_connection.port if serial_connection else None,
+        'gps_port': gps_port,
+        'gps_source': gps_source,
         'flock_connected': flock_device_connected,
         'flock_port': flock_device_port
     })
 
 @app.route('/api/gps/ports', methods=['GET'])
 def get_gps_ports():
-    """Get available serial ports for GPS"""
-    ports = []
-    for port in serial.tools.list_ports.comports():
-        port_info = {
-            'device': port.device,
-            'description': port.description,
-            'manufacturer': port.manufacturer if port.manufacturer else 'Unknown',
-            'product': port.product if port.product else 'Unknown',
-            'vid': port.vid,
-            'pid': port.pid
-        }
-        ports.append(port_info)
-    return jsonify(ports)
+    """Get available GPS sources: serial ports plus the phone's own GPS"""
+    return jsonify(android_compat.gps_pseudo_ports() + android_compat.list_serial_ports())
 
 @app.route('/api/flock/ports', methods=['GET'])
 def get_flock_ports():
     """Get available serial ports for Flock You device"""
-    ports = []
-    for port in serial.tools.list_ports.comports():
-        port_info = {
-            'device': port.device,
-            'description': port.description,
-            'manufacturer': port.manufacturer if port.manufacturer else 'Unknown',
-            'product': port.product if port.product else 'Unknown',
-            'vid': port.vid,
-            'pid': port.pid
-        }
-        ports.append(port_info)
-    return jsonify(ports)
+    return jsonify(android_compat.list_serial_ports())
+
+@app.route('/api/platform', methods=['GET'])
+def get_platform():
+    """Platform diagnostics - which compatibility paths are active and why"""
+    return jsonify(android_compat.platform_report())
 
 @app.route('/api/export/csv', methods=['GET'])
 def export_csv():
@@ -826,9 +901,8 @@ def export_csv():
         return jsonify({'status': 'error', 'message': 'No detections to export'}), 400
     
     filename = f"{filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    filepath = os.path.join('exports', filename)
-    
-    os.makedirs('exports', exist_ok=True)
+    EXPORT_DIR.mkdir(exist_ok=True)
+    filepath = EXPORT_DIR / filename
     
     with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
         fieldnames = [
@@ -891,9 +965,8 @@ def export_kml():
         return jsonify({'status': 'error', 'message': 'No detections to export'}), 400
     
     filename = f"{filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.kml"
-    filepath = os.path.join('exports', filename)
-    
-    os.makedirs('exports', exist_ok=True)
+    EXPORT_DIR.mkdir(exist_ok=True)
+    filepath = EXPORT_DIR / filename
     
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
@@ -1414,7 +1487,7 @@ def refresh_oui_database():
 
         oui_database = new_oui_database
         
-        with open('oui.txt', 'w', encoding='utf-8') as f:
+        with open(OUI_FILE, 'w', encoding='utf-8') as f:
             for mac, manufacturer in sorted(oui_database.items()):
                 formatted_mac = f"{mac[0:2]}-{mac[2:4]}-{mac[4:6]}"
                 f.write(f"{formatted_mac}   (hex)\t\t\t\t{manufacturer}\n")
@@ -1529,12 +1602,16 @@ if __name__ == '__main__':
     heartbeat_thread = threading.Thread(target=send_heartbeat, daemon=True)
     heartbeat_thread.start()
     
+    host = os.environ.get('FLOCKYOU_HOST', '0.0.0.0')
+    port = int(os.environ.get('FLOCKYOU_PORT', '5000'))
+
     print("Starting Flock You API server...")
-    print("Server will be available at: http://localhost:5000")
+    android_compat.print_startup_banner()
+    print(f"Server will be available at: http://localhost:{port}")
     print("Press Ctrl+C to stop the server")
-    
+
     try:
-        socketio.run(app, debug=False, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
+        socketio.run(app, debug=False, host=host, port=port, allow_unsafe_werkzeug=True)
     except KeyboardInterrupt:
         print("\nShutting down server...")
         # Clean up connections
