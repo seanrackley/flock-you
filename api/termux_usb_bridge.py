@@ -46,11 +46,23 @@ DEFAULT_STATE_FILE = os.path.join(
 LIBUSB_OPTION_NO_DEVICE_DISCOVERY = 2  # a.k.a. WEAK_AUTHORITY; must precede init
 
 LIBUSB_SUCCESS = 0
-LIBUSB_ERROR_TIMEOUT = -7
-LIBUSB_ERROR_NO_DEVICE = -4
-LIBUSB_ERROR_BUSY = -6
+LIBUSB_ERROR_IO = -1
 LIBUSB_ERROR_ACCESS = -3
+LIBUSB_ERROR_NO_DEVICE = -4
+LIBUSB_ERROR_NOT_FOUND = -5
+LIBUSB_ERROR_BUSY = -6
+LIBUSB_ERROR_TIMEOUT = -7
+LIBUSB_ERROR_PIPE = -9
 LIBUSB_ERROR_NOT_SUPPORTED = -12
+
+# Unplugging the device on Android surfaces as LIBUSB_ERROR_IO rather than the
+# NO_DEVICE you might expect, so treat the whole family as "it went away".
+DISCONNECT_ERRORS = (
+    LIBUSB_ERROR_IO,
+    LIBUSB_ERROR_NO_DEVICE,
+    LIBUSB_ERROR_NOT_FOUND,
+    LIBUSB_ERROR_PIPE,
+)
 
 LIBUSB_CLASS_COMM = 0x02       # CDC control interface
 LIBUSB_CLASS_DATA = 0x0A       # CDC data interface
@@ -305,6 +317,10 @@ class UsbCdcDevice(object):
         self.descriptor = None
         self.layout = []
 
+    def _error_name(self, code):
+        name = self.lib.libusb_error_name(code)
+        return '{} ({})'.format(name.decode() if name else 'unknown', code)
+
     def _check(self, code, action):
         if code < 0:
             name = self.lib.libusb_error_name(code)
@@ -504,10 +520,13 @@ class UsbCdcDevice(object):
         if result == LIBUSB_ERROR_TIMEOUT:
             # A timeout can still deliver a partial transfer.
             return bytes(buffer[:transferred.value]) if transferred.value else b''
-        if result == LIBUSB_ERROR_NO_DEVICE:
-            raise BridgeError('USB device disconnected')
+        if result in DISCONNECT_ERRORS:
+            raise BridgeError(
+                'USB device disconnected [{}]. Replug it and run ./start-all.sh '
+                'again -- Android grants the descriptor for one session only.'
+                .format(self._error_name(result)))
         if result < 0:
-            raise BridgeError('bulk read failed ({})'.format(result))
+            raise BridgeError('bulk read failed: {}'.format(self._error_name(result)))
 
         return bytes(buffer[:transferred.value])
 
@@ -520,8 +539,11 @@ class UsbCdcDevice(object):
         result = self.lib.libusb_bulk_transfer(
             self.handle, ctypes.c_ubyte(self.interfaces.endpoint_out), buffer,
             len(data), ctypes.byref(transferred), timeout_ms)
+        if result in DISCONNECT_ERRORS:
+            raise BridgeError(
+                'USB device disconnected [{}]'.format(self._error_name(result)))
         if result < 0 and result != LIBUSB_ERROR_TIMEOUT:
-            raise BridgeError('bulk write failed ({})'.format(result))
+            raise BridgeError('bulk write failed: {}'.format(self._error_name(result)))
         return transferred.value
 
     def close(self):

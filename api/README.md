@@ -147,6 +147,12 @@ and exits, which is the quickest way to see whether it looks like CDC-ACM:
 ./start-usb-bridge.sh --probe
 ```
 
+Unplugging the sniffer stops the bridge: it reports `USB device disconnected`,
+clears its dropdown entry and exits, while the dashboard keeps running with the
+detections already captured. Replug and rerun `./start-all.sh` to resume —
+Android grants the USB descriptor for one session only, so the bridge cannot
+reattach on its own.
+
 Only standard CDC-ACM devices work. A board using a CP210x, CH340 or FTDI chip
 speaks a vendor-specific protocol this bridge does not implement; `--probe` will
 report no CDC data interface in that case. Requires libusb 1.0.23 or newer for
