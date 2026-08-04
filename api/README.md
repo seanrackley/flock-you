@@ -149,9 +149,18 @@ and exits, which is the quickest way to see whether it looks like CDC-ACM:
 
 Unplugging the sniffer stops the bridge: it reports `USB device disconnected`,
 clears its dropdown entry and exits, while the dashboard keeps running with the
-detections already captured. Replug and rerun `./start-all.sh` to resume —
-Android grants the USB descriptor for one session only, so the bridge cannot
-reattach on its own.
+detections already captured. Android grants the USB descriptor for one
+`termux-usb` session only, so the bridge cannot reattach from inside itself —
+but `start-all.sh` watches for the device and relaunches it, so **replugging
+resumes capture on its own**, with no UI interaction. Expect the Android USB
+permission prompt again on replug.
+
+While the cable is out, the supervisor polls with `termux-usb -l`, which raises
+no dialog, so an unplugged sniffer stays quiet rather than prompting repeatedly.
+Because a `socket://` bridge can legitimately come back, the dashboard keeps
+retrying such a port for about ten minutes instead of the five quick attempts it
+gives a device path. If the bridge fails to start three times in a row the
+supervisor stops rather than looping; `--no-restart` disables it entirely.
 
 Only standard CDC-ACM devices work. A board using a CP210x, CH340 or FTDI chip
 speaks a vendor-specific protocol this bridge does not implement; `--probe` will

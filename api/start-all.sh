@@ -32,6 +32,8 @@ cleanup() {
     trap - INT TERM EXIT
     echo ""
     echo "shutting down..."
+    # Kill the supervisor first so it does not relaunch the bridge we are about
+    # to stop.
     [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null
     [ -n "$DASHBOARD_PID" ] && kill "$DASHBOARD_PID" 2>/dev/null
     # termux-usb runs the bridge as its own child, which may outlive its parent.
@@ -44,13 +46,57 @@ echo "starting dashboard..."
 $PYTHON "$SCRIPT_DIR/flockyou.py" &
 DASHBOARD_PID=$!
 
+# Keep the bridge running across cable disconnects. Android hands out the USB
+# descriptor for one termux-usb session only, so a replug cannot be recovered
+# from inside the bridge -- it has to be relaunched.
+supervise_bridge() {
+    failures=0
+    while :; do
+        # termux-usb -l raises no permission dialog, so polling for the device
+        # keeps an unplugged cable quiet instead of prompting repeatedly.
+        if ! termux-usb -l 2>/dev/null | grep -q '/dev/bus/usb/'; then
+            sleep 3
+            continue
+        fi
+
+        started=$(date +%s)
+        # shellcheck disable=SC2086
+        sh "$SCRIPT_DIR/start-usb-bridge.sh" $BRIDGE_ARGS
+        ran=$(( $(date +%s) - started ))
+
+        if [ "$ran" -ge 15 ]; then
+            failures=0        # it worked for a while, so this was a disconnect
+        else
+            failures=$((failures + 1))
+        fi
+
+        if [ "$failures" -ge 3 ]; then
+            echo ""
+            echo "bridge failed 3 times in a row - not retrying."
+            echo "check ./start-usb-bridge.sh --probe, then rerun ./start-all.sh"
+            return
+        fi
+
+        [ "$ran" -ge 15 ] && echo "bridge stopped - watching for the device to come back..."
+        sleep $((failures * 5 + 2))
+    done
+}
+
 if [ "$WANT_BRIDGE" = "1" ]; then
     # Give the dashboard a moment so its startup output is not interleaved with
     # the USB permission prompt.
     sleep 2
     echo "starting USB bridge..."
-    # shellcheck disable=SC2086
-    sh "$SCRIPT_DIR/start-usb-bridge.sh" $BRIDGE_ARGS &
+    case " $BRIDGE_ARGS " in
+        *" --probe "*)
+            # --probe exits by design, so supervising it would loop forever.
+            # shellcheck disable=SC2086
+            sh "$SCRIPT_DIR/start-usb-bridge.sh" $BRIDGE_ARGS &
+            ;;
+        *)
+            supervise_bridge &
+            ;;
+    esac
     BRIDGE_PID=$!
 fi
 
@@ -59,6 +105,6 @@ echo "dashboard: http://localhost:${FLOCKYOU_PORT:-5000}"
 echo "press Ctrl+C to stop everything"
 echo ""
 
-# If the bridge exits (no device, unplugged, not CDC-ACM) the dashboard carries
-# on: imports, exports and browser GPS all still work without a sniffer.
+# The dashboard is what we wait on: if the bridge stops for good, imports,
+# exports and browser GPS all still work without a sniffer.
 wait "$DASHBOARD_PID"
