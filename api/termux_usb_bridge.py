@@ -157,6 +157,18 @@ class BridgeError(Exception):
     """Raised with a message that explains what to do about it."""
 
 
+class DeviceGoneError(BridgeError):
+    """The device was unplugged.
+
+    Distinct from a failure to start, so a supervisor can relaunch on a flaky
+    cable without counting the disconnect as a fault.
+    """
+
+
+EXIT_ERROR = 1
+EXIT_DEVICE_GONE = 3
+
+
 def write_state(path, host, port, description):
     """Announce this bridge so the dashboard can list it as a selectable port."""
     if not path:
@@ -521,7 +533,7 @@ class UsbCdcDevice(object):
             # A timeout can still deliver a partial transfer.
             return bytes(buffer[:transferred.value]) if transferred.value else b''
         if result in DISCONNECT_ERRORS:
-            raise BridgeError(
+            raise DeviceGoneError(
                 'USB device disconnected [{}]. Replug it and run ./start-all.sh '
                 'again -- Android grants the descriptor for one session only.'
                 .format(self._error_name(result)))
@@ -540,7 +552,7 @@ class UsbCdcDevice(object):
             self.handle, ctypes.c_ubyte(self.interfaces.endpoint_out), buffer,
             len(data), ctypes.byref(transferred), timeout_ms)
         if result in DISCONNECT_ERRORS:
-            raise BridgeError(
+            raise DeviceGoneError(
                 'USB device disconnected [{}]'.format(self._error_name(result)))
         if result < 0 and result != LIBUSB_ERROR_TIMEOUT:
             raise BridgeError('bulk write failed: {}'.format(self._error_name(result)))
@@ -732,9 +744,14 @@ def main(argv=None):
         print('it will appear in the dashboard\'s Sniffer dropdown', file=sys.stderr)
         server.pump()
 
+    except DeviceGoneError as exc:
+        # A separate exit code so the supervisor can tell "cable pulled" from
+        # "could not start", and only cap retries on the latter.
+        print('error: {}'.format(exc), file=sys.stderr)
+        return EXIT_DEVICE_GONE
     except BridgeError as exc:
         print('error: {}'.format(exc), file=sys.stderr)
-        return 1
+        return EXIT_ERROR
     except KeyboardInterrupt:
         print('\nstopping', file=sys.stderr)
     finally:

@@ -157,10 +157,16 @@ permission prompt again on replug.
 
 While the cable is out, the supervisor polls with `termux-usb -l`, which raises
 no dialog, so an unplugged sniffer stays quiet rather than prompting repeatedly.
-Because a `socket://` bridge can legitimately come back, the dashboard keeps
-retrying such a port for about ten minutes instead of the five quick attempts it
-gives a device path. If the bridge fails to start three times in a row the
-supervisor stops rather than looping; `--no-restart` disables it entirely.
+Because a `socket://` bridge can legitimately come back — and how long that
+takes depends on when someone accepts the permission prompt — the dashboard
+retries such a port indefinitely, stopping only when you disconnect deliberately.
+A device path keeps the five quick attempts, since a missing node will not
+return.
+
+A disconnect never counts against the retry budget, however briefly the bridge
+ran, so a loose connector that flaps repeatedly keeps recovering. Only a genuine
+failure to start counts, and three in a row stop the supervisor rather than
+looping; `--no-restart` disables it entirely.
 
 Only standard CDC-ACM devices work. A board using a CP210x, CH340 or FTDI chip
 speaks a vendor-specific protocol this bridge does not implement; `--probe` will

@@ -51,6 +51,7 @@ DASHBOARD_PID=$!
 # from inside the bridge -- it has to be relaunched.
 supervise_bridge() {
     failures=0
+    launches=0
     while :; do
         # termux-usb -l raises no permission dialog, so polling for the device
         # keeps an unplugged cable quiet instead of prompting repeatedly.
@@ -59,13 +60,21 @@ supervise_bridge() {
             continue
         fi
 
+        launches=$((launches + 1))
+        echo "[bridge] launch #$launches - accept the Android USB prompt if it appears"
         started=$(date +%s)
         # shellcheck disable=SC2086
         sh "$SCRIPT_DIR/start-usb-bridge.sh" $BRIDGE_ARGS
+        status=$?
         ran=$(( $(date +%s) - started ))
+        echo "[bridge] launch #$launches exited with status $status after ${ran}s"
 
-        if [ "$ran" -ge 15 ]; then
-            failures=0        # it worked for a while, so this was a disconnect
+        # Exit status 3 means the cable was pulled, which is not a fault however
+        # briefly the bridge ran -- a loose connector in a vehicle can flap
+        # repeatedly and must not exhaust the retry budget. Anything else that
+        # dies quickly is a real failure to start.
+        if [ "$status" = "3" ] || [ "$ran" -ge 15 ]; then
+            failures=0
         else
             failures=$((failures + 1))
         fi
@@ -77,7 +86,7 @@ supervise_bridge() {
             return
         fi
 
-        [ "$ran" -ge 15 ] && echo "bridge stopped - watching for the device to come back..."
+        [ "$ran" -ge 15 ] && echo "[bridge] watching for the device to come back..."
         sleep $((failures * 5 + 2))
     done
 }

@@ -51,10 +51,13 @@ max_reconnect_attempts = 5
 reconnect_delay = 3  # seconds
 
 # A URL port (a socket:// bridge) can legitimately come back after it dies --
-# unplugging the sniffer stops the USB bridge, and replugging restarts it. A
-# missing device node will not, so only URLs get the patient retry policy.
-max_url_reconnect_attempts = 120
-url_reconnect_delay = 5  # seconds, so roughly ten minutes of retrying
+# unplugging the sniffer stops the USB bridge, and replugging restarts it. How
+# long that takes depends on when someone accepts Android's USB permission
+# prompt, so there is no sensible deadline: keep trying until the user
+# disconnects. A missing device node will not come back, so a device path keeps
+# the short retry.
+max_url_reconnect_attempts = None  # None means keep trying indefinitely
+url_reconnect_delay = 5  # seconds between attempts
 
 connection_lock = threading.Lock()
 serial_queue = queue.Queue()
@@ -74,7 +77,11 @@ SETTINGS_FILE = DATA_DIR / 'settings.json'
 DATA_DIR.mkdir(exist_ok=True)
 
 def reconnect_policy(port):
-    """Return (attempt limit, delay) appropriate to the kind of port."""
+    """Return (attempt limit, delay) appropriate to the kind of port.
+
+    A None limit means retry forever; the loop still stops when the port is
+    cleared by an explicit disconnect.
+    """
     if port and '://' in port:
         return max_url_reconnect_attempts, url_reconnect_delay
     return max_reconnect_attempts, reconnect_delay
@@ -636,9 +643,16 @@ def attempt_reconnect_flock():
 
         try:
           with app.app_context():
-            while not flock_device_connected and reconnect_attempts['flock'] < attempt_limit:
+            while (not flock_device_connected
+                   and flock_device_port  # cleared by an explicit disconnect
+                   and (attempt_limit is None or reconnect_attempts['flock'] < attempt_limit)):
                 try:
-                    print(f"Attempting to reconnect to Flock device (attempt {reconnect_attempts['flock'] + 1}/{attempt_limit})")
+                    attempt = reconnect_attempts['flock'] + 1
+                    # Retrying forever would otherwise log every few seconds all
+                    # day, so quieten down to once a minute after the first few.
+                    if attempt <= 3 or attempt % 12 == 0:
+                        target = attempt_limit if attempt_limit is not None else 'no limit'
+                        print(f"Attempting to reconnect to Flock device (attempt {attempt}/{target})")
                     
                     # Try to reconnect
                     if flock_serial_connection:
@@ -668,11 +682,12 @@ def attempt_reconnect_flock():
                     return
                     
                 except Exception as e:
-                    print(f"Reconnection attempt failed: {e}")
+                    if attempt <= 3 or attempt % 12 == 0:
+                        print(f"Reconnection attempt failed: {e}")
                     reconnect_attempts['flock'] += 1
                     time.sleep(delay)
 
-            if reconnect_attempts['flock'] >= attempt_limit:
+            if attempt_limit is not None and reconnect_attempts['flock'] >= attempt_limit:
                 print("Max reconnection attempts reached for Flock device")
                 safe_socket_emit('reconnect_failed', {'device': 'flock'})
                 reconnect_attempts['flock'] = 0  # Reset for future attempts
