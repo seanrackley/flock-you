@@ -1718,21 +1718,14 @@
                     // Restore selection if it still exists in the new list
                     addManualOption(select, 'flock');
 
-                    // Keep the live connection selectable even when its entry is
-                    // missing from the list, which happens while the bridge is
-                    // restarting.
-                    if (connectedFlockPort && !Array.from(select.options).some(o => o.value === connectedFlockPort)) {
-                        const option = document.createElement('option');
-                        option.value = connectedFlockPort;
-                        option.textContent = connectedFlockPort + ' (connected)';
-                        select.insertBefore(option, select.querySelector('option[value="__manual__"]'));
-                    }
-
                     if (currentSelection && (ports.some(p => p.device === currentSelection) || currentSelection === manualPorts.flock)) {
                         select.value = currentSelection;
-                    } else if (connectedFlockPort) {
-                        select.value = connectedFlockPort;
                     }
+
+                    // Keep the live connection selected even when its entry is
+                    // missing from the list, which happens while the bridge is
+                    // restarting.
+                    syncFlockPortSelection();
                     
                     // Reset refresh button
                     refreshBtn.textContent = '↻';
@@ -1988,6 +1981,7 @@
                 .then(data => {
                     console.log('Status loaded:', data);
                     connectedFlockPort = data.flock_connected ? data.flock_port : null;
+                    syncFlockPortSelection();
                     updateFlockStatus(data.flock_connected);
                     updateGpsStatus(data.gps_connected);
                     
@@ -2369,6 +2363,7 @@
         socket.on('flock_reconnected', function(data) {
             console.log('Sniffer device reconnected:', data);
             connectedFlockPort = data && data.port ? data.port : connectedFlockPort;
+            syncFlockPortSelection();
             rejoinSerialTerminalIfNeeded();
             updateFlockStatus(true);
             document.getElementById('connectFlockBtn').style.display = 'none';
@@ -2461,6 +2456,29 @@
                     addSerialLine('Connection timeout - check device connection', 'error');
                 }
             }, 5000);
+        }
+
+        // Point the dropdown at whatever is actually connected. Called from the
+        // 5s status poll and the reconnect event, not just the 30s port refresh,
+        // so the UI cannot sit contradicting itself for half a minute.
+        function syncFlockPortSelection() {
+            const select = document.getElementById('flockDeviceSelect');
+            if (!select || !connectedFlockPort) return;
+            if (userInteractingWithPorts) return;   // do not fight the user
+            if (select.value === connectedFlockPort) return;
+
+            if (!Array.from(select.options).some(o => o.value === connectedFlockPort)) {
+                const option = document.createElement('option');
+                option.value = connectedFlockPort;
+                option.textContent = connectedFlockPort + ' (connected)';
+                const manualTrigger = select.querySelector('option[value="__manual__"]');
+                if (manualTrigger) {
+                    select.insertBefore(option, manualTrigger);
+                } else {
+                    select.appendChild(option);
+                }
+            }
+            select.value = connectedFlockPort;
         }
 
         // Rejoin the terminal's room after the socket session is replaced, or
