@@ -173,6 +173,22 @@ speaks a vendor-specific protocol this bridge does not implement; `--probe` will
 report no CDC data interface in that case. Requires libusb 1.0.23 or newer for
 `libusb_wrap_sys_device`.
 
+### Session vs all-time detections
+
+The detections table has a **View** selector. *This Session* shows what has been
+seen since the server started and is empty after a restart by design; *All Time*
+shows the cumulative record kept in `data/cumulative_detections.pkl`, which
+survives restarts. Previously the cumulative set was only reachable through the
+map and the exports, so history looked lost when it was not.
+
+Cumulative records are keyed on MAC across sessions. An earlier version matched
+only against the current session, so a device seen on a second outing was
+appended as a new row and subsequent updates landed on whichever row matched
+first — one device became several rows with its count split between them. Such
+files are repaired automatically on load: rows sharing a MAC are merged, counts
+summed, the earliest `first_seen` and latest `last_seen` kept, and any alias
+preserved.
+
 ### Serial terminal and the port dropdown across a reconnect
 
 Two things used to make a working recovery look broken. The terminal feed is a

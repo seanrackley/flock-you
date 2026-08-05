@@ -1314,6 +1314,14 @@
                     </div>
                     
                     <div class="control-group">
+                        <label>View:</label>
+                        <select id="viewSelect">
+                            <option value="session">This Session</option>
+                            <option value="cumulative">All Time</option>
+                        </select>
+                    </div>
+
+                    <div class="control-group">
                         <label>Filter:</label>
                         <select id="filterSelect">
                             <option value="all">All Detections</option>
@@ -1501,6 +1509,15 @@
         });
         let detections = [];
         let cumulativeDetections = [];
+
+        // Which set the detections table shows. Session data is emptied on
+        // restart by design; the cumulative set is what persists to disk, and
+        // without this it was only reachable via the map and the exports.
+        let detectionView = 'session';
+
+        function activeDetections() {
+            return detectionView === 'cumulative' ? cumulativeDetections : detections;
+        }
         let gpsConnected = false;
         const max_reconnect_attempts = 5;
         let userInteractingWithPorts = false; // Flag to prevent auto-refresh interference
@@ -1543,6 +1560,15 @@
         });
 
         function setupEventListeners() {
+            document.getElementById('viewSelect').addEventListener('change', function() {
+                detectionView = this.value;
+                if (detectionView === 'cumulative') {
+                    loadCumulativeDetections();   // re-renders when it lands
+                } else {
+                    filterDetections(document.getElementById('filterSelect').value);
+                }
+            });
+
             document.getElementById('filterSelect').addEventListener('change', function() {
                 filterDetections(this.value);
                 saveSettings();
@@ -2001,11 +2027,11 @@
         }
 
         function filterDetections(filter) {
+            const source = activeDetections();
             if (filter === 'all') {
-                renderDetections(detections);
+                renderDetections(source);
             } else {
-                const filtered = detections.filter(d => d.detection_method === filter);
-                renderDetections(filtered);
+                renderDetections(source.filter(d => d.detection_method === filter));
             }
         }
 
@@ -2014,12 +2040,12 @@
             
             if (!searchQuery) {
                 // If search is empty, show all detections
-                renderDetections(detections);
+                renderDetections(activeDetections());
                 return;
             }
             
             // Search through all detection fields
-            const filtered = detections.filter(detection => {
+            const filtered = activeDetections().filter(detection => {
                 return (
                     detection.mac_address.toLowerCase().includes(searchQuery) ||
                     (detection.manufacturer && detection.manufacturer.toLowerCase().includes(searchQuery)) ||
@@ -2060,7 +2086,7 @@
                 });
         }
 
-        function renderDetections(detectionsToRender = detections) {
+        function renderDetections(detectionsToRender = activeDetections()) {
             const container = document.getElementById('detectionsList');
             
             if (detectionsToRender.length === 0) {
@@ -2987,6 +3013,10 @@
                 .then(data => {
                     cumulativeDetections = data;
                     console.log('Loaded cumulative detections:', cumulativeDetections.length);
+
+                    if (detectionView === 'cumulative') {
+                        filterDetections(document.getElementById('filterSelect').value);
+                    }
                     
                     // Update map if it's open and showing cumulative data
                     if (map && document.getElementById('mapContainer').style.display !== 'none') {

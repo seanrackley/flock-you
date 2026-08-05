@@ -91,6 +91,41 @@ def reconnect_policy(port):
     return max_reconnect_attempts, reconnect_delay
 
 # Persistent storage functions
+def merge_cumulative_duplicates(rows):
+    """Collapse rows that share a MAC into one all-time record.
+
+    Earlier versions appended a new row per session instead of matching on MAC,
+    so a device seen across several outings ended up as several rows with the
+    counts split between them. Merging on load repairs those files in place.
+    """
+    merged = []
+    by_mac = {}
+
+    for row in rows:
+        mac = row.get('mac_address')
+        if not mac:
+            merged.append(row)          # nothing to key on; keep as-is
+            continue
+
+        existing = by_mac.get(mac)
+        if existing is None:
+            by_mac[mac] = row
+            merged.append(row)
+            continue
+
+        existing['detection_count'] = (existing.get('detection_count') or 0) + (row.get('detection_count') or 0)
+        for field, newest in (('first_seen', min), ('last_seen', max)):
+            values = [v for v in (existing.get(field), row.get(field)) if v]
+            if values:
+                existing[field] = newest(values)
+        # Prefer any detail the older row was missing.
+        for field in ('gps', 'manufacturer', 'device_name', 'ssid', 'alias',
+                      'detection_method', 'protocol', 'last_rssi', 'last_channel'):
+            if not existing.get(field) and row.get(field):
+                existing[field] = row[field]
+
+    return merged
+
 def load_cumulative_detections():
     """Load cumulative detections from disk"""
     global cumulative_detections
@@ -98,6 +133,13 @@ def load_cumulative_detections():
         if CUMULATIVE_DATA_FILE.exists():
             with open(CUMULATIVE_DATA_FILE, 'rb') as f:
                 cumulative_detections = pickle.load(f)
+
+            before = len(cumulative_detections)
+            cumulative_detections = merge_cumulative_duplicates(cumulative_detections)
+            if len(cumulative_detections) != before:
+                print(f"Merged {before - len(cumulative_detections)} duplicate cumulative rows")
+                save_cumulative_detections()
+
             print(f"Loaded {len(cumulative_detections)} cumulative detections")
         else:
             cumulative_detections = []
@@ -468,6 +510,30 @@ def validate_gps_data(gps_data):
     
     return True, "Valid GPS data"
 
+def record_cumulative(cumulative_entry, record):
+    """Fold a sighting into the all-time record for its MAC.
+
+    detection_count on the session record counts this session only, so the
+    running total has to be carried across explicitly rather than copied over.
+    """
+    if cumulative_entry is None:
+        cumulative_detections.append(record.copy())
+        save_cumulative_detections()
+        return
+
+    total = (cumulative_entry.get('detection_count') or 0) + 1
+    first_seen = cumulative_entry.get('first_seen')
+    alias = cumulative_entry.get('alias')
+
+    cumulative_entry.update(record)
+    cumulative_entry['detection_count'] = total
+    if first_seen:
+        cumulative_entry['first_seen'] = first_seen
+    if alias and not record.get('alias'):
+        cumulative_entry['alias'] = alias   # keep a name given in an earlier session
+
+    save_cumulative_detections()
+
 def add_detection_from_serial(data):
     """Add detection from serial data - counts detections per MAC address"""
     global detections, cumulative_detections, gps_data, next_detection_id
@@ -557,6 +623,17 @@ def add_detection_from_serial(data):
                 existing_detection = detection
                 break
     
+    # The cumulative record is keyed on MAC across sessions, independently of
+    # the session view, so history survives a restart. Looking it up only in the
+    # session list meant a restart created a second row for the same device and
+    # updates then landed on whichever row matched first.
+    cumulative_entry = None
+    if mac_address:
+        for candidate in cumulative_detections:
+            if candidate.get('mac_address') == mac_address:
+                cumulative_entry = candidate
+                break
+
     if existing_detection:
         # Update existing detection with new data and increment count
         existing_detection['detection_count'] = existing_detection.get('detection_count', 1) + 1
@@ -575,13 +652,8 @@ def add_detection_from_serial(data):
         if data.get('gps'):
             existing_detection['gps'] = data['gps']
         
-        # Update cumulative detections
-        for cum_detection in cumulative_detections:
-            if cum_detection.get('mac_address') == mac_address:
-                cum_detection.update(existing_detection)
-                break
-        save_cumulative_detections()
-        
+        record_cumulative(cumulative_entry, existing_detection)
+
         # Emit updated detection
         safe_socket_emit('detection_updated', existing_detection)
         print(f"Updated detection: MAC {mac_address}, Count: {existing_detection['detection_count']}, Method: {existing_detection.get('detection_method')}")
@@ -595,11 +667,9 @@ def add_detection_from_serial(data):
         data['last_seen'] = datetime.now().isoformat()
         
         detections.append(data)
-        
-        # Add to cumulative detections
-        cumulative_detections.append(data.copy())
-        save_cumulative_detections()
-        
+
+        record_cumulative(cumulative_entry, data)
+
         # Emit to connected clients
         safe_socket_emit('new_detection', data)
         print(f"New detection added: ID {data['id']}, Method: {data.get('detection_method')}, MAC: {mac_address}")
