@@ -47,6 +47,10 @@ oui_database = {}
 serial_data_buffer = []
 reconnect_attempts = {'flock': 0, 'gps': 0}
 reconnecting = {'flock': False, 'gps': False}  # guards against duplicate reconnect threads
+# Bumped every time a reader is started. A reader whose generation is stale
+# exits: two threads calling readline() on one pySerial socket race each other
+# and surface as spurious "socket disconnected" errors.
+flock_reader_generation = 0
 max_reconnect_attempts = 5
 reconnect_delay = 3  # seconds
 
@@ -327,15 +331,35 @@ def termux_location_reader():
                 break
             time.sleep(0.1)
 
-def flock_reader():
+def retire_flock_reader():
+    """Retire the live reader before closing its socket.
+
+    Order matters: a reader blocked in readline() wakes with an exception when
+    the socket closes, and only stays quiet if its generation is already stale.
+    """
+    global flock_reader_generation
+    flock_reader_generation += 1
+
+def start_flock_reader():
+    """Start the one live reader, retiring any earlier one."""
+    global flock_reader_generation
+    flock_reader_generation += 1
+    thread = threading.Thread(target=flock_reader, args=(flock_reader_generation,), daemon=True)
+    thread.start()
+    return thread
+
+def flock_reader(generation):
     """Background thread for reading Flock device data"""
     global flock_serial_connection, flock_device_connected, serial_data_buffer
-    
+
     with app.app_context():
-        while flock_device_connected:
-            if flock_serial_connection and flock_serial_connection.is_open:
+        while flock_device_connected and generation == flock_reader_generation:
+            # Work from a local handle: disconnect_flock() can null the global
+            # between the check and the read.
+            connection = flock_serial_connection
+            if connection and connection.is_open:
                 try:
-                    line = flock_serial_connection.readline().decode('utf-8', errors='ignore')
+                    line = connection.readline().decode('utf-8', errors='ignore')
                     if line:
                         line = line.strip()
                         if line:
@@ -373,6 +397,8 @@ def flock_reader():
                                 print(f"Flock device (non-JSON): {line}")
                                 
                 except Exception as e:
+                    if generation != flock_reader_generation:
+                        return  # superseded by a newer reader; not an error
                     print(f"Flock device read error: {e}")
                     with connection_lock:
                         flock_device_connected = False
@@ -677,8 +703,7 @@ def attempt_reconnect_flock():
                     safe_socket_emit('flock_reconnected', {'port': flock_device_port})
                     
                     # Restart the reading thread
-                    flock_thread = threading.Thread(target=flock_reader, daemon=True)
-                    flock_thread.start()
+                    start_flock_reader()
                     return
                     
                 except Exception as e:
@@ -932,16 +957,29 @@ def connect_flock():
     port = data.get('port')
     
     try:
+        # Retire whatever was running first. Connecting while an automatic
+        # reconnect had already succeeded would otherwise leave two readers on
+        # one socket, which shows up as random "socket disconnected" errors.
+        with connection_lock:
+            flock_device_connected = False
+        retire_flock_reader()
+        if flock_serial_connection:
+            try:
+                flock_serial_connection.close()
+            except Exception:
+                pass
+            flock_serial_connection = None
+
         # Create persistent connection to the port (accepts a device path or a
         # pySerial URL such as socket://192.168.1.50:4000)
         flock_serial_connection = android_compat.open_serial(port, 115200, timeout=1)
         with connection_lock:
             flock_device_connected = True
         flock_device_port = port
+        reconnect_attempts['flock'] = 0  # fresh budget for this connection
 
         # Start reading thread
-        flock_thread = threading.Thread(target=flock_reader, daemon=True)
-        flock_thread.start()
+        start_flock_reader()
 
         return jsonify({'status': 'success', 'message': f'Connected to Flock You device on {port}'})
     except Exception as e:
@@ -954,10 +992,14 @@ def disconnect_flock():
     
     with connection_lock:
         flock_device_connected = False
-    flock_device_port = None
-    
-    if flock_serial_connection and flock_serial_connection.is_open:
-        flock_serial_connection.close()
+    flock_device_port = None          # also stops any reconnect loop
+    retire_flock_reader()
+
+    if flock_serial_connection:
+        try:
+            flock_serial_connection.close()
+        except Exception:
+            pass
         flock_serial_connection = None
     
     return jsonify({'status': 'success', 'message': 'Flock You device disconnected'})
