@@ -173,6 +173,16 @@ speaks a vendor-specific protocol this bridge does not implement; `--probe` will
 report no CDC data interface in that case. Requires libusb 1.0.23 or newer for
 `libusb_wrap_sys_device`.
 
+### Serial terminal and the port dropdown across a reconnect
+
+Two things used to make a working recovery look broken. The terminal feed is a
+Socket.IO room, and room membership dies with the session, so a browser
+reconnect silently stopped the output — the terminal now rejoins automatically.
+And the bridge's entry disappears from the port list while it is restarting,
+which reset the dropdown to its placeholder even though the server was still
+connected; the dropdown now follows what `/api/status` reports as the live
+connection, so the two cannot contradict each other.
+
 ### GPS from the phone
 
 Android will not open a USB GPS dongle either, but the phone has its own

@@ -1718,8 +1718,20 @@
                     // Restore selection if it still exists in the new list
                     addManualOption(select, 'flock');
 
+                    // Keep the live connection selectable even when its entry is
+                    // missing from the list, which happens while the bridge is
+                    // restarting.
+                    if (connectedFlockPort && !Array.from(select.options).some(o => o.value === connectedFlockPort)) {
+                        const option = document.createElement('option');
+                        option.value = connectedFlockPort;
+                        option.textContent = connectedFlockPort + ' (connected)';
+                        select.insertBefore(option, select.querySelector('option[value="__manual__"]'));
+                    }
+
                     if (currentSelection && (ports.some(p => p.device === currentSelection) || currentSelection === manualPorts.flock)) {
                         select.value = currentSelection;
+                    } else if (connectedFlockPort) {
+                        select.value = connectedFlockPort;
                     }
                     
                     // Reset refresh button
@@ -1838,6 +1850,16 @@
         // Browser geolocation source. Used when Termux:API is unavailable (the
         // Google Play build of Termux has no Termux:API app), and on any phone
         // where Android blocks access to a USB GPS receiver.
+        // What the server reports as actually connected. The USB bridge entry
+        // disappears from the port list while the bridge is down, so without
+        // this the dropdown resets to the placeholder while the server is still
+        // connected -- the UI then contradicts itself.
+        let connectedFlockPort = null;
+
+        // Socket.IO room membership dies with the session, so a socket
+        // reconnect silently stops the terminal feed until we rejoin.
+        let serialTerminalJoined = false;
+
         const BROWSER_GPS_PORT = 'browser-gps';
         let browserGpsWatchId = null;
 
@@ -1965,6 +1987,7 @@
                 .then(response => response.json())
                 .then(data => {
                     console.log('Status loaded:', data);
+                    connectedFlockPort = data.flock_connected ? data.flock_port : null;
                     updateFlockStatus(data.flock_connected);
                     updateGpsStatus(data.gps_connected);
                     
@@ -2230,10 +2253,12 @@
         // Socket connection events
         socket.on('connect', function() {
             console.log('Socket connected');
+            rejoinSerialTerminalIfNeeded();
         });
 
         socket.on('disconnect', function() {
             console.log('Socket disconnected');
+            serialTerminalJoined = false;   // room membership went with the session
         });
 
         socket.on('reconnect', function(attemptNumber) {
@@ -2241,6 +2266,7 @@
             // Reload data after reconnection
             loadDetections();
             loadStatus();
+            rejoinSerialTerminalIfNeeded();
         });
 
         socket.on('reconnect_failed', function() {
@@ -2342,6 +2368,8 @@
 
         socket.on('flock_reconnected', function(data) {
             console.log('Sniffer device reconnected:', data);
+            connectedFlockPort = data && data.port ? data.port : connectedFlockPort;
+            rejoinSerialTerminalIfNeeded();
             updateFlockStatus(true);
             document.getElementById('connectFlockBtn').style.display = 'none';
             document.getElementById('disconnectFlockBtn').style.display = 'inline-block';
@@ -2378,8 +2406,9 @@
                 button.style.background = 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)';
                 
                 // Start serial connection if device is connected
-                const flockPort = document.getElementById('flockDeviceSelect').value;
+                const flockPort = document.getElementById('flockDeviceSelect').value || connectedFlockPort;
                 if (flockPort) {
+                    serialTerminalJoined = false;
                     startSerialConnection(flockPort);
                 } else {
                     addSerialLine('No Sniffer device selected', 'error');
@@ -2432,6 +2461,20 @@
                     addSerialLine('Connection timeout - check device connection', 'error');
                 }
             }, 5000);
+        }
+
+        // Rejoin the terminal's room after the socket session is replaced, or
+        // once the sniffer comes back from a replug. Guarded so we do not
+        // re-request an already-live feed, which would replay the backlog.
+        function rejoinSerialTerminalIfNeeded() {
+            const container = document.getElementById('serialTerminalContainer');
+            if (!container || container.style.display === 'none') return;
+            if (serialTerminalJoined) return;
+
+            const port = document.getElementById('flockDeviceSelect').value || connectedFlockPort;
+            if (port) {
+                socket.emit('request_serial_terminal', {port: port});
+            }
         }
 
         function addSerialLine(text, type = 'normal') {
@@ -2523,6 +2566,7 @@
 
         socket.on('serial_connected', function() {
             console.log('Serial terminal connected');
+            serialTerminalJoined = true;
             const statusElement = document.getElementById('serialConnectionStatus');
             if (statusElement) {
                 statusElement.textContent = 'Connected';
@@ -2543,6 +2587,7 @@
 
         socket.on('serial_error', function(data) {
             console.log('Serial error:', data);
+            serialTerminalJoined = false;
             if (data && data.message) {
                 addSerialLine(`Error: ${data.message}`, 'error');
             } else {
