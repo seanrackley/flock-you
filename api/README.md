@@ -173,6 +173,19 @@ speaks a vendor-specific protocol this bridge does not implement; `--probe` will
 report no CDC data interface in that case. Requires libusb 1.0.23 or newer for
 `libusb_wrap_sys_device`.
 
+### Phone layout
+
+The dashboard is used primarily on a phone, so the `max-width: 768px` rules
+matter. Watch for two recurring causes of a sideways scroll when editing them: a
+flex row with `flex-shrink: 0` and no `flex-wrap` (the device control rows), and
+`select`/`input` elements, which will not shrink below their intrinsic width
+until `min-width: 0` is set. Statistics collapse to two columns and the
+hover-only cumulative hint is hidden, since neither works on a touch screen.
+
+Flask caches the compiled template when `debug=False`, so **restart the server
+after editing `index.html`** — a browser reload alone will keep serving the old
+markup.
+
 ### Session vs all-time detections
 
 The detections table has a **View** selector. *This Session* shows what has been

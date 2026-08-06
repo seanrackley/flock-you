@@ -1239,7 +1239,111 @@
             .control-group {
                 width: 100%;
                 justify-content: space-between;
+                /* Without these the row is pinned to its natural width and the
+                   Connect/Disconnect buttons hang off the right edge. */
+                flex-wrap: wrap;
+                flex-shrink: 1;
+                min-width: 0;
             }
+
+            /* A select has an intrinsic minimum width and will not shrink below
+               it unless told to, which pushes everything after it off-screen. */
+            .port-controls,
+            .port-controls select,
+            .control-group select {
+                min-width: 0;
+            }
+
+            .export-buttons {
+                flex-wrap: wrap;
+                gap: 0.5rem;
+            }
+
+            /* Same story as the port row: an input with flex:1 still refuses to
+               go below its intrinsic width unless min-width is released. */
+            .oui-search-controls {
+                flex-wrap: wrap;
+                gap: 0.5rem;
+            }
+
+            .oui-search-input {
+                min-width: 0;
+                flex: 1 1 100%;
+            }
+
+            /* Four full-width cards pushed the detection list an entire screen
+               down. Two per row, tighter, so detections are visible on arrival. */
+            .stats-grid {
+                grid-template-columns: 1fr 1fr;
+                gap: 0.5rem;
+                margin-bottom: 1rem;
+            }
+
+            .stat-card {
+                padding: 0.75rem 0.5rem;
+            }
+
+            .stat-number {
+                font-size: 1.5rem;
+            }
+
+            .stat-label {
+                font-size: 0.8rem;
+                margin-top: 0.25rem;
+            }
+
+            /* There is no hover on a touch screen, and the View selector now
+               covers this properly. */
+            .stat-hint {
+                display: none;
+            }
+
+            /* Title and its controls fought for one row and overlapped. */
+            .detections-header {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 0.5rem;
+            }
+
+            /* The method badge was squeezed until "PROBE_REQUEST" broke across
+               three lines and "GPS" stacked one letter per row. */
+            .detection-header {
+                flex-wrap: wrap;
+                gap: 0.4rem;
+            }
+
+            .detection-header-left {
+                flex-wrap: wrap;
+                gap: 0.4rem;
+                min-width: 0;
+            }
+
+            .detection-method,
+            .gps-badge,
+            .detection-count {
+                white-space: nowrap;
+                flex-shrink: 0;
+            }
+
+            .detection-method {
+                font-size: 0.7rem;
+            }
+
+            .export-buttons a,
+            .export-buttons button {
+                flex: 1 1 45%;
+                text-align: center;
+            }
+
+            /* Long MACs, SSIDs and URLs are the other thing that forces a
+               sideways scroll on a narrow screen. */
+            .detection-item,
+            .detection-details,
+            .detection-details * {
+                min-width: 0;
+                overflow-wrap: anywhere;
+            }
+
             
             .action-buttons {
                 flex-direction: column;
