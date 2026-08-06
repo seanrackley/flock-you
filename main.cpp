@@ -62,7 +62,12 @@ static const size_t  customChannelCount = sizeof(customChannels) / sizeof(custom
 static const uint8_t fullHopChannels[] = {1,2,3,4,5,6,7,8,9,10,11};
 static const size_t  fullHopChannelCount = sizeof(fullHopChannels) / sizeof(fullHopChannels[0]);
 
-#define HEARTBEAT_MS    30000
+// Deliberately not a whole multiple of CHANNEL_DWELL_MS. At 30000 ms with a
+// 150 ms dwell each heartbeat advanced exactly 200 slots, and 200 % 32 == 8 --
+// which is always a channel-1 slot in the interleaved pattern, so the reported
+// channel was pinned to 1 forever and told you nothing. An off-beat interval
+// drifts through the pattern instead.
+#define HEARTBEAT_MS    29000
 #define RSSI_MIN        -95
 #define ALERT_COOLDOWN_MS 5000
 
@@ -493,8 +498,15 @@ static void updateChannelMode() {
 
 static void printHeartbeat() {
   if (millis() - lastHeartbeat >= HEARTBEAT_MS) {
-    dualPrintf("[flockyou] scanning (ch=%u mode=%s det=%d)\n",
-                  currentChannel, channelModeName(), fyDetCount);
+    // The startup banner is easily lost: USB CDC writes are dropped rather than
+    // buffered while no host is attached (Serial.setTxTimeoutMs(0)), so on a
+    // native-USB board it is usually gone before a monitor can reattach after
+    // reset. Repeating the scan plan here makes the running config visible
+    // whenever you happen to look.
+    dualPrintf("[flockyou] scanning (ch=%u mode=%s slots=%u dwell_ms=%u det=%d)\n",
+                  currentChannel, channelModeName(),
+                  (unsigned)activeChannelCount(), (unsigned)CHANNEL_DWELL_MS,
+                  fyDetCount);
     lastHeartbeat = millis();
   }
 }

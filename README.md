@@ -211,6 +211,9 @@ pio run -t upload           # flash
 pio device monitor          # serial output
 ```
 
+pio run -t upload --environment xiao_esp32s3
+pio device monitor --environment xiao_esp32s3
+
 `platformio.ini` and `partitions.csv` are at the root (1.9 MB SPIFFS partition, 6 MB app). No extra libraries needed beyond the Arduino-ESP32 core that ships with the espressif32 platform.
 
 ---
