@@ -36,6 +36,13 @@ gps_data = None
 gps_history = []  # Buffer of recent GPS readings for temporal matching
 MAX_GPS_HISTORY = 100  # Keep last 100 GPS readings
 GPS_MATCH_THRESHOLD = 30  # Max seconds between detection and GPS reading
+
+# Browser GPS is pulled on demand rather than streamed. A position asked for at
+# detection time necessarily arrives after the detection was recorded, so it is
+# applied backwards over the sightings it actually belongs to.
+GPS_BACKFILL_WINDOW = 15   # seconds a fresh fix may reach back over
+GPS_REQUEST_MIN_GAP = 3    # seconds between asking the browser for a position
+last_position_request = 0.0
 serial_connection = None
 gps_enabled = False
 gps_port = None  # Tracked separately so reconnects work after the port object is gone
@@ -534,13 +541,32 @@ def record_cumulative(cumulative_entry, record):
 
     save_cumulative_detections()
 
+def request_browser_position():
+    """Ask the browser for a fix, rate-limited so a burst cannot spam it."""
+    global last_position_request
+
+    if not gps_enabled or gps_source != 'browser':
+        return
+
+    now = time.time()
+    if now - last_position_request < GPS_REQUEST_MIN_GAP:
+        return
+
+    last_position_request = now
+    safe_socket_emit('request_position', {})
+
 def add_detection_from_serial(data):
     """Add detection from serial data - counts detections per MAC address"""
     global detections, cumulative_detections, gps_data, next_detection_id
-    
+
+    # Start the browser acquiring straight away; the answer is applied by
+    # backfill_detection_gps() once it lands.
+    request_browser_position()
+
     # Add server timestamp first (system time when detection was processed)
     system_time = time.time()
     data['server_timestamp'] = datetime.fromtimestamp(system_time).isoformat()
+    data['server_epoch'] = system_time   # numeric, for GPS backfill comparisons
     
     # Try to find the best GPS match for this detection's timestamp
     best_gps = find_best_gps_match(system_time)
@@ -638,6 +664,7 @@ def add_detection_from_serial(data):
         # Update existing detection with new data and increment count
         existing_detection['detection_count'] = existing_detection.get('detection_count', 1) + 1
         existing_detection['last_seen'] = datetime.now().isoformat()
+        existing_detection['server_epoch'] = system_time
         existing_detection['last_rssi'] = data.get('rssi', existing_detection.get('last_rssi'))
         existing_detection['last_channel'] = data.get('channel', existing_detection.get('last_channel'))
         existing_detection['last_frequency'] = data.get('frequency', existing_detection.get('last_frequency'))
@@ -946,6 +973,54 @@ def connect_gps():
     except Exception as e:
         return jsonify({'status': 'error', 'message': android_compat.describe_serial_error(port or '', e)}), 400
 
+def backfill_detection_gps(fix, fix_epoch):
+    """Apply a just-arrived fix to sightings logged moments before it.
+
+    Only ever improves a detection: it fills in a missing position, or replaces
+    one whose temporal match was worse than this fix's.
+    """
+    improved = []
+
+    for detection in detections:
+        seen = detection.get('server_epoch')
+        if seen is None or not (0 <= fix_epoch - seen <= GPS_BACKFILL_WINDOW):
+            continue
+
+        gap = fix_epoch - seen
+        current = detection.get('gps') or {}
+        current_gap = current.get('time_diff')
+        if current.get('latitude') is not None and current_gap is not None and current_gap <= gap:
+            continue   # what it already has is closer in time
+
+        detection['gps'] = {
+            'latitude': fix['latitude'],
+            'longitude': fix['longitude'],
+            'altitude': fix.get('altitude'),
+            'timestamp': fix.get('timestamp'),
+            'satellites': fix.get('satellites', 0),
+            'fix_quality': fix.get('fix_quality', 1),
+            'time_diff': gap,
+            'match_quality': 'browser_on_detection',
+        }
+        if fix.get('accuracy') is not None:
+            detection['gps']['accuracy'] = fix['accuracy']
+        improved.append(detection)
+
+    if not improved:
+        return 0
+
+    for detection in improved:
+        mac = detection.get('mac_address')
+        for cumulative in cumulative_detections:
+            if mac and cumulative.get('mac_address') == mac:
+                cumulative['gps'] = detection['gps']
+                break
+        safe_socket_emit('detection_updated', detection)
+
+    save_cumulative_detections()
+    print(f"Applied browser fix to {len(improved)} recent detection(s)")
+    return len(improved)
+
 @app.route('/api/gps/position', methods=['POST'])
 def receive_browser_position():
     """Accept a position from the browser's Geolocation API.
@@ -1001,7 +1076,9 @@ def receive_browser_position():
                      f"Browser GPS: {fix['latitude']}, {fix['longitude']}{accuracy_text}",
                      room='serial_terminal')
 
-    return jsonify({'status': 'success'})
+    backfilled = backfill_detection_gps(fix, gps_entry['system_timestamp'])
+
+    return jsonify({'status': 'success', 'backfilled': backfilled})
 
 @app.route('/api/gps/disconnect', methods=['POST'])
 def disconnect_gps():

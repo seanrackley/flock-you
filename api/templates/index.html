@@ -1724,6 +1724,38 @@
                 });
         }
 
+        // Reconnect whatever was in use last time, once, at startup. Saves two
+        // taps at the start of every drive; skipped if the server is already
+        // connected or the user has since chosen something else.
+        let autoConnectDone = false;
+
+        function autoConnectSavedPorts(status) {
+            if (autoConnectDone) return;
+            autoConnectDone = true;
+
+            fetch('/api/settings')
+                .then(response => response.json())
+                .then(settings => {
+                    if (!status.flock_connected && settings.flock_port) {
+                        console.log('Auto-connecting sniffer:', settings.flock_port);
+                        const select = document.getElementById('flockDeviceSelect');
+                        // The port list may not have loaded yet; add the entry so
+                        // selecting it cannot silently fail.
+                        ensurePortOption(select, settings.flock_port);
+                        select.value = settings.flock_port;
+                        connectFlock(true);
+                    }
+                    if (!status.gps_connected && settings.gps_port) {
+                        console.log('Auto-connecting GPS:', settings.gps_port);
+                        const select = document.getElementById('gpsPortSelect');
+                        ensurePortOption(select, settings.gps_port);
+                        select.value = settings.gps_port;
+                        connectGps(true);
+                    }
+                })
+                .catch(error => console.error('Auto-connect failed:', error));
+        }
+
         function loadSettings() {
             fetch('/api/settings')
                 .then(response => response.json())
@@ -1871,10 +1903,10 @@
                 });
         }
 
-        function connectFlock() {
+        function connectFlock(silent) {
             const port = document.getElementById('flockDeviceSelect').value;
             if (!port) {
-                alert('Please select a Sniffer port');
+                if (!silent) alert('Please select a Sniffer port');
                 return;
             }
 
@@ -1894,7 +1926,7 @@
                     updateFlockStatus(true);
                     document.getElementById('connectFlockBtn').style.display = 'none';
                     document.getElementById('disconnectFlockBtn').style.display = 'inline-block';
-                } else {
+                } else if (!silent) {
                     alert('Flock You connection failed: ' + data.message);
                 }
             })
@@ -1984,7 +2016,47 @@
         let serialTerminalJoined = false;
 
         const BROWSER_GPS_PORT = 'browser-gps';
+        const GPS_HEARTBEAT_MS = 15000;   // idle rate; detections trigger extra sends
         let browserGpsWatchId = null;
+        let latestFix = null;
+        let lastFixSent = 0;
+
+        function sendLatestFix() {
+            if (!latestFix) return;
+            lastFixSent = Date.now();
+            fetch('/api/gps/position', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(latestFix)
+            }).catch(error => console.error('Failed to send position:', error));
+        }
+
+        // A sleeping screen throttles watchPosition, which silently stops GPS
+        // mid-drive. Hold a wake lock for as long as a GPS source is connected.
+        let screenWakeLock = null;
+
+        async function acquireWakeLock() {
+            if (!('wakeLock' in navigator) || screenWakeLock) return;
+            try {
+                screenWakeLock = await navigator.wakeLock.request('screen');
+                screenWakeLock.addEventListener('release', () => { screenWakeLock = null; });
+                console.log('Screen wake lock acquired');
+            } catch (error) {
+                console.warn('Wake lock unavailable:', error.message);
+            }
+        }
+
+        function releaseWakeLock() {
+            if (screenWakeLock) {
+                screenWakeLock.release().catch(() => {});
+                screenWakeLock = null;
+            }
+        }
+
+        // The lock is dropped whenever the tab is hidden, so take it again.
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && gpsConnected) acquireWakeLock();
+        });
 
         function startBrowserGps() {
             if (!navigator.geolocation) {
@@ -1994,16 +2066,17 @@
 
             browserGpsWatchId = navigator.geolocation.watchPosition(
                 position => {
-                    fetch('/api/gps/position', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            latitude: position.coords.latitude,
-                            longitude: position.coords.longitude,
-                            altitude: position.coords.altitude,
-                            accuracy: position.coords.accuracy
-                        })
-                    }).catch(error => console.error('Failed to send position:', error));
+                    // Keep the newest fix in memory. Posting every one meant
+                    // thousands of requests an hour; the server asks when a
+                    // detection actually needs a position, and a slow heartbeat
+                    // covers the map and the gap before the first detection.
+                    latestFix = {
+                        latitude: position.coords.latitude,
+                        longitude: position.coords.longitude,
+                        altitude: position.coords.altitude,
+                        accuracy: position.coords.accuracy
+                    };
+                    if (Date.now() - lastFixSent >= GPS_HEARTBEAT_MS) sendLatestFix();
                 },
                 error => {
                     console.error('Browser GPS error:', error);
@@ -2025,10 +2098,10 @@
             }
         }
 
-        function connectGps() {
+        function connectGps(silent) {
             const port = document.getElementById('gpsPortSelect').value;
             if (!port) {
-                alert('Please select a GPS port');
+                if (!silent) alert('Please select a GPS port');
                 return;
             }
 
@@ -2048,11 +2121,12 @@
                     if (port === BROWSER_GPS_PORT) {
                         startBrowserGps();
                     }
+                    acquireWakeLock();
                     gpsConnected = true;
                     updateGpsStatus(true);
                     document.getElementById('connectGpsBtn').style.display = 'none';
                     document.getElementById('disconnectGpsBtn').style.display = 'inline-block';
-                } else {
+                } else if (!silent) {
                     alert('GPS connection failed: ' + data.message);
                 }
             })
@@ -2066,6 +2140,8 @@
             console.log('Disconnecting GPS device');
 
             stopBrowserGps();
+            releaseWakeLock();
+            latestFix = null;
 
             fetch('/api/gps/disconnect', {
                 method: 'POST'
@@ -2111,6 +2187,7 @@
                 .then(data => {
                     console.log('Status loaded:', data);
                     connectedFlockPort = data.flock_connected ? data.flock_port : null;
+                    autoConnectSavedPorts(data);
                     syncFlockPortSelection();
                     updateFlockStatus(data.flock_connected);
                     updateGpsStatus(data.gps_connected);
@@ -2192,6 +2269,14 @@
 
         function renderDetections(detectionsToRender = activeDetections()) {
             const container = document.getElementById('detectionsList');
+
+            // Newest first: while driving the hit you care about is the last
+            // one, and it was previously at the bottom of a growing list.
+            detectionsToRender = detectionsToRender.slice().sort((a, b) => {
+                const at = Date.parse(a.last_seen || a.timestamp || 0) || 0;
+                const bt = Date.parse(b.last_seen || b.timestamp || 0) || 0;
+                return bt - at;
+            });
             
             if (detectionsToRender.length === 0) {
                 container.innerHTML = `
@@ -2456,6 +2541,11 @@
             }
         });
 
+        // The server detected something and wants a position for it.
+        socket.on('request_position', function() {
+            sendLatestFix();
+        });
+
         socket.on('gps_update', function(gpsData) {
             console.log('GPS Update:', gpsData);
         });
@@ -2591,23 +2681,28 @@
         // Point the dropdown at whatever is actually connected. Called from the
         // 5s status poll and the reconnect event, not just the 30s port refresh,
         // so the UI cannot sit contradicting itself for half a minute.
+        function ensurePortOption(select, value, suffix) {
+            if (!select || !value) return;
+            if (Array.from(select.options).some(o => o.value === value)) return;
+
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = value + (suffix || '');
+            const manualTrigger = select.querySelector('option[value="__manual__"]');
+            if (manualTrigger) {
+                select.insertBefore(option, manualTrigger);
+            } else {
+                select.appendChild(option);
+            }
+        }
+
         function syncFlockPortSelection() {
             const select = document.getElementById('flockDeviceSelect');
             if (!select || !connectedFlockPort) return;
             if (userInteractingWithPorts) return;   // do not fight the user
             if (select.value === connectedFlockPort) return;
 
-            if (!Array.from(select.options).some(o => o.value === connectedFlockPort)) {
-                const option = document.createElement('option');
-                option.value = connectedFlockPort;
-                option.textContent = connectedFlockPort + ' (connected)';
-                const manualTrigger = select.querySelector('option[value="__manual__"]');
-                if (manualTrigger) {
-                    select.insertBefore(option, manualTrigger);
-                } else {
-                    select.appendChild(option);
-                }
-            }
+            ensurePortOption(select, connectedFlockPort, ' (connected)');
             select.value = connectedFlockPort;
         }
 

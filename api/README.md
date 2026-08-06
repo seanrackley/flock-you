@@ -173,6 +173,26 @@ speaks a vendor-specific protocol this bridge does not implement; `--probe` will
 report no CDC data interface in that case. Requires libusb 1.0.23 or newer for
 `libusb_wrap_sys_device`.
 
+### Driving conveniences
+
+- **Screen wake lock** is held while a GPS source is connected. Without it the
+  screen sleeps, the browser throttles `watchPosition`, and location tagging
+  stops silently mid-drive.
+- **Saved ports reconnect at startup**, so a session begins without tapping
+  Connect twice. A failure is logged rather than shown as a dialog.
+- **Detections are listed newest first**, since the useful one while moving is
+  the most recent.
+- **GPS is fetched on demand, not streamed.** The browser keeps the newest fix
+  in memory and sends it when the server asks — which it does when a detection
+  arrives, rate-limited to one request every few seconds — plus a slow heartbeat
+  for the map. Idle traffic drops from roughly 3600 posts an hour to under 250.
+
+  A position requested at detection time necessarily arrives *after* the
+  detection was recorded, so the server applies it backwards: a fix is written
+  onto sightings from the preceding `GPS_BACKFILL_WINDOW` seconds when it is a
+  closer temporal match than whatever they already had. It never replaces a
+  better match with a worse one.
+
 ### Phone layout
 
 The dashboard is used primarily on a phone, so the `max-width: 768px` rules
