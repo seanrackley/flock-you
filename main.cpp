@@ -84,6 +84,22 @@ static const size_t  fullHopChannelCount = sizeof(fullHopChannels) / sizeof(full
 #define HB_BEEP_NOTE_MS        70
 #define HB_BEEP_GAP_MS         70
 
+// Buzzer selectivity. The target OUI list is vendor-wide -- Espressif, Samsung,
+// Liteon and friends -- so the broad addr2/addr1 fallbacks fire for ordinary
+// consumer gear all over a neighbourhood, which is what makes the buzzer sound
+// errant on a drive.
+//
+// These affect AUDIO ONLY. Every hit is still counted, logged, written to
+// SPIFFS and sent to the dashboard exactly as before.
+//
+//   BUZZ_HIGH_CONFIDENCE_ONLY  1 = only the wildcard-probe (and SSID) signature
+//                                  is audible, whatever its signal strength
+//                              0 = any hit is audible if it clears BUZZ_MIN_RSSI
+//   BUZZ_MIN_RSSI              a broad hit this strong is audible anyway, on the
+//                              grounds that something this close is worth hearing
+#define BUZZ_HIGH_CONFIDENCE_ONLY 1
+#define BUZZ_MIN_RSSI            -75
+
 #define ENABLE_SSID_MATCH 0
 #define CHECK_ADDR1 1   // dst/rx — catches Flock STAs receiving probe responses
 #define CHECK_ADDR3 0   // bssid fallback for randomised addr2
@@ -984,6 +1000,14 @@ static void IRAM_ATTR wifiSniffer(void* buf, wifi_promiscuous_pkt_type_t type) {
 // DRAIN QUEUE — called from loop(), safe to Serial.print here
 // ============================================================
 
+// Decides audibility only -- never whether a detection is recorded.
+static inline bool alertIsBuzzWorthy(AlertType type, int8_t rssi) {
+#if BUZZ_HIGH_CONFIDENCE_ONLY
+  if (type == ALERT_WILDCARD_PROBE || type == ALERT_SSID) return true;
+#endif
+  return rssi >= BUZZ_MIN_RSSI;
+}
+
 static void drainAlertQueue() {
   while (true) {
     portENTER_CRITICAL(&queueMux);
@@ -1005,10 +1029,13 @@ static void drainAlertQueue() {
                              (e.type == ALERT_SSID) ? e.ssid : nullptr,
                              &chirpWorthy);
 
-    // Refresh the global "still around" timer for the heartbeat tick.
-    // Done unconditionally so a device counts as active even when serial is
-    // rate-limited (still audible via heartbeat, just quieter on the wire).
-    fyLastTargetSeen = millis();
+    const bool buzzWorthy = alertIsBuzzWorthy(e.type, e.rssi);
+
+    // Refresh the global "still around" timer for the heartbeat tick. Gated on
+    // buzz-worthiness, or a passing phone would keep the heartbeat sounding for
+    // as long as it is in range. Still done before the duplicate suppression
+    // below, so a present-but-rate-limited target stays audible.
+    if (buzzWorthy) fyLastTargetSeen = millis();
 
     // Serial-rate-limit: suppress emit/beep/flash within ALERT_COOLDOWN_MS.
     if (shouldSuppressDuplicate(macStr)) continue;
@@ -1035,7 +1062,7 @@ static void drainAlertQueue() {
     //   - NEW MAC  → two fast ascending beeps (clearly distinct sound)
     //   - REPEAT   → silent; the heartbeat tick covers continued presence
     // LED flashes on every emitted detection either way.
-    if (chirpWorthy) {
+    if (chirpWorthy && buzzWorthy) {
       newDetectChirp();
       // Reset the heartbeat phase so the first follow-up beep lands
       // HB_BEEP_INTERVAL_MS after the initial chirp, not mid-window.
