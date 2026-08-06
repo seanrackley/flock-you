@@ -28,10 +28,35 @@
 #define CHANNEL_MODE_SINGLE     2
 
 #define CHANNEL_MODE CHANNEL_MODE_CUSTOM
-#define CHANNEL_DWELL_MS 350
+#define CHANNEL_DWELL_MS 150
 #define SINGLE_CHANNEL 1
 
-static const uint8_t customChannels[]  = {1, 6, 11};
+// Weighted hop rather than 1/6/11 alone. A target associated to an AP on, say,
+// channel 3 transmits only on channel 3, so listening to three channels left us
+// blind to eight of eleven no matter how close we were or how long we dwelled.
+//
+// Interleaving keeps the popular channels dominant instead of splitting time
+// evenly, which a plain full hop would do:
+//
+//                  time on 1/6/11 each   time on the other 8 each   full sweep
+//   {1,6,11}@350ms         33%                     0%                 1.05 s
+//   full hop  @150ms        9%                     9%                 1.65 s
+//   this list @150ms       25%                    3.1%                4.80 s
+//
+// 1/6/11 come round every 4 slots (600 ms); the rotating channel advances one
+// step per pass, so everything is covered in 4.8 s. Keep the dwell at 110 ms or
+// more: beacons arrive about every 102 ms, and below that a channel's beacon
+// can be skipped entirely.
+static const uint8_t customChannels[]  = {
+  1, 6, 11,  2,
+  1, 6, 11,  3,
+  1, 6, 11,  4,
+  1, 6, 11,  5,
+  1, 6, 11,  7,
+  1, 6, 11,  8,
+  1, 6, 11,  9,
+  1, 6, 11, 10
+};
 static const size_t  customChannelCount = sizeof(customChannels) / sizeof(customChannels[0]);
 
 static const uint8_t fullHopChannels[] = {1,2,3,4,5,6,7,8,9,10,11};
@@ -404,6 +429,16 @@ static void stopSniffing(const char* reason) {
   sniffingStopped = true;
   esp_wifi_set_promiscuous(false);
   dualPrintf("[flockyou] sniffing stopped: %s\n", reason);
+}
+
+static size_t activeChannelCount() {
+#if CHANNEL_MODE == CHANNEL_MODE_SINGLE
+  return 1;
+#elif CHANNEL_MODE == CHANNEL_MODE_CUSTOM
+  return customChannelCount;
+#else
+  return fullHopChannelCount;
+#endif
 }
 
 static void applyInitialChannel() {
@@ -1103,9 +1138,10 @@ void setup() {
   esp_wifi_set_promiscuous(true);
 
   dualPrintln("[flockyou] merged WiFi detector started");
-  dualPrintf("[flockyou] mode=%s dwell_ms=%u start_channel=%u rssi_min=%d spiffs=%d\n",
-                channelModeName(), CHANNEL_DWELL_MS, currentChannel,
-                RSSI_MIN, fySpiffsReady ? 1 : 0);
+  dualPrintf("[flockyou] mode=%s dwell_ms=%u slots=%u sweep_ms=%u start_channel=%u rssi_min=%d spiffs=%d\n",
+                channelModeName(), CHANNEL_DWELL_MS,
+                (unsigned)activeChannelCount(), (unsigned)(activeChannelCount() * CHANNEL_DWELL_MS),
+                currentChannel, RSSI_MIN, fySpiffsReady ? 1 : 0);
 
   lastHeartbeat = millis();
   fyLastSaveAt  = millis();
